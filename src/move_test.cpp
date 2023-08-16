@@ -38,7 +38,12 @@ cv::Mat cameraMatrix(3,3, CV_32FC1), distCoeffs;
 Eigen::Quaterniond orientation_d;
 Eigen::Vector3d position_d;
 Eigen::Vector3d position_p;
-
+Eigen::Vector3d position_i;
+int frame_number = 0;
+double translational_stiffness{100.0};
+double rotational_stiffness{10.0};
+Eigen::MatrixXd stiffness(6, 6), damping(6, 6);
+ 
 cv::Ptr<cv::aruco::Dictionary> dictionary = cv::aruco::getPredefinedDictionary(cv::aruco::DICT_5X5_50);
 //cv::aruco::Dictionary dictionary = cv::aruco::extendDictionary(1, 5);
 Eigen::Isometry3d pose_offset;
@@ -83,7 +88,8 @@ void realsense_callback(const rs2::frame& frame) {
     //image.copyTo(outputImage);    
     //cout << "[CB] id " << ids.size() << endl;
     if (ids.size() == 1 && ids.front() == 0) {
-    	cv::Vec3d rvec, tvec;
+    	frame_number = 0;
+	cv::Vec3d rvec, tvec;
 	vector<int> dist;
 	cv::solvePnP(objPoints, corners.at(0), cameraMatrix, dist, rvec, tvec);
 
@@ -103,18 +109,32 @@ void realsense_callback(const rs2::frame& frame) {
 	camera_T_tag.translation() = eigen_translation;
 
 	// Should work as follows
-	
-	g_T_t = g_T_c * camera_T_tag;	
-	position_p = g_T_t.translation();
+        if (eigen_translation[0] > -0.3 && eigen_translation[0] < 0.3 && eigen_translation[1] < 0.3 && eigen_translation[1] > -0.3 && eigen_translation[2] > 0.1 && eigen_translation[2] < 0.6) {	
+		Eigen::Vector3d offset;
+                offset << 0.,0.,0.3;
+		g_T_t = g_T_c * camera_T_tag;
+	        g_T_t.translation() = g_T_t.translation() - offset; 	
+		position_p = g_T_t.translation();
+	}
 	//cout << "pos in t: " << tvec[0] << " " << tvec[1] << " " << tvec[2] << endl << flush;
-	//cout << "pos in g: " <<position_p[0] << " " << position_p[1] << " " << position_p[2] << endl << endl << flush;
+	cout << "pos in g: " <<position_p[0] << " " << position_p[1] << " " << position_p[2] << endl << endl << flush;
 
 	//// TODO: run aruco tag detector in opencv
 	//// TODO: compute tag pose (using instrinsics)
 	//// assign pose to global variable
 	//lock_guard<std::mutex> lock(pose_mutex);
 	//pose_initialized = true;
+    } else {
+    	frame_number ++;
     }
+
+    if (frame_number > 10) {
+	cout << endl << endl << "dropped stifnes" << endl << endl << flush;    
+    	translational_stiffness = 100;
+    } else {
+    	translational_stiffness = 150;
+    }
+
     cv::imshow("tasde", image);
     cv::waitKey(5);
     } catch (std::exception const & ex ) {
@@ -165,9 +185,6 @@ int main(int argc, char** argv) {
   // save to global variable
 
   // Compliance parameters
-  const double translational_stiffness{150.0};
-  const double rotational_stiffness{10.0};
-  Eigen::MatrixXd stiffness(6, 6), damping(6, 6);
   stiffness.setZero();
   stiffness.topLeftCorner(3, 3) << translational_stiffness * Eigen::MatrixXd::Identity(3, 3);
   stiffness.bottomRightCorner(3, 3) << rotational_stiffness * Eigen::MatrixXd::Identity(3, 3);
@@ -186,7 +203,9 @@ int main(int argc, char** argv) {
     franka::RobotState initial_state = robot.readOnce();
     // equilibrium point is the initial position
     Eigen::Isometry3d initial_transform(Eigen::Matrix4d::Map(initial_state.O_T_EE.data()));
-    position_d = Eigen::Vector3d(initial_transform.translation());
+    position_d = Eigen::Vector3d::Zero();
+
+    position_i = Eigen::Vector3d(initial_transform.translation());
     orientation_d = Eigen::Quaterniond(initial_transform.rotation());
     
     // set collision behavior
@@ -217,12 +236,14 @@ int main(int argc, char** argv) {
 
       Eigen::Isometry3d O_T_tag = O_T_EE * g_T_t;
       Eigen::Vector3d den(O_T_tag.translation());
-      cout << "tag in  base: "<< den[0] << " " << den[1] << " " << den[2] << endl << endl << flush; 
+      //cout << "tag in  base: "<< den[0] << " " << den[1] << " " << den[2] << endl << endl << flush; 
+      position_d = O_T_EE.linear() * g_T_t.translation();
+      std::cout << "positioni_d " << position_d.transpose() << std::endl;
 
       // compute error to desired equilibrium pose
       // position error
       Eigen::Matrix<double, 6, 1> error;
-      error.head(3) << position - position_d;
+      error.head(3) << position - (position_i + position_d);
       // orientation error
       // "difference" quaternion
       if (orientation_d.coeffs().dot(orientation.coeffs()) < 0.0) {
