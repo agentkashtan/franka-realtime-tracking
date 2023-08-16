@@ -40,8 +40,8 @@ Eigen::Vector3d position_d;
 Eigen::Vector3d position_p;
 Eigen::Vector3d position_i;
 int frame_number = 0;
-double translational_stiffness{100.0};
-double rotational_stiffness{10.0};
+double translational_stiffness{80.0};
+double rotational_stiffness{20.0};
 Eigen::MatrixXd stiffness(6, 6), damping(6, 6);
  
 cv::Ptr<cv::aruco::Dictionary> dictionary = cv::aruco::getPredefinedDictionary(cv::aruco::DICT_5X5_50);
@@ -117,7 +117,7 @@ void realsense_callback(const rs2::frame& frame) {
 		position_p = g_T_t.translation();
 	}
 	//cout << "pos in t: " << tvec[0] << " " << tvec[1] << " " << tvec[2] << endl << flush;
-	cout << "pos in g: " <<position_p[0] << " " << position_p[1] << " " << position_p[2] << endl << endl << flush;
+	//cout << translational_stiffness << endl << endl;
 
 	//// TODO: run aruco tag detector in opencv
 	//// TODO: compute tag pose (using instrinsics)
@@ -128,11 +128,10 @@ void realsense_callback(const rs2::frame& frame) {
     	frame_number ++;
     }
 
-    if (frame_number > 10) {
-	cout << endl << endl << "dropped stifnes" << endl << endl << flush;    
-    	translational_stiffness = 100;
+    if (frame_number > 10) {    
+    	translational_stiffness = 80;
     } else {
-    	translational_stiffness = 150;
+    	translational_stiffness = 200;
     }
 
     cv::imshow("tasde", image);
@@ -193,7 +192,9 @@ int main(int argc, char** argv) {
                                      Eigen::MatrixXd::Identity(3, 3);
   damping.bottomRightCorner(3, 3) << 2.0 * sqrt(rotational_stiffness) *
                                          Eigen::MatrixXd::Identity(3, 3);
-
+  Eigen::Matrix<double,6,1> integral;
+  integral.setZero();
+  double integral_gain = 0.1;
   try {
 
     setDefaultBehavior(robot);
@@ -244,6 +245,8 @@ int main(int argc, char** argv) {
       // position error
       Eigen::Matrix<double, 6, 1> error;
       error.head(3) << position - (position_i + position_d);
+      integral.head(3) += error.head(3);
+      integral = integral.cwiseMax(-100.).cwiseMin(100.);
       // orientation error
       // "difference" quaternion
       if (orientation_d.coeffs().dot(orientation.coeffs()) < 0.0) {
@@ -259,7 +262,7 @@ int main(int argc, char** argv) {
       Eigen::VectorXd tau_task(7), tau_d(7);
 
       // Spring damper system with damping ratio=1
-      tau_task << jacobian.transpose() * (-stiffness * error - damping * (jacobian * dq));
+      tau_task << jacobian.transpose() * (-stiffness * error - damping * (jacobian * dq) - integral_gain * integral);
       tau_d << tau_task + coriolis;
 
       array<double, 7> tau_d_array{};
