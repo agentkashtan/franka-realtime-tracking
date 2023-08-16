@@ -48,8 +48,8 @@ Eigen::Isometry3d g_T_t;
 void realsense_callback(const rs2::frame& frame) {
     Eigen::Isometry3d g_T_c;
     g_T_c.setIdentity();
-    g_T_c.linear() = Eigen::AngleAxisd(-1.57, Eigen::Vector3d::UnitY()).toRotationMatrix();
-    g_T_c.translation() << 0., 0., 0.06;
+    g_T_c.linear() = Eigen::AngleAxisd(-1.57, Eigen::Vector3d::UnitZ()).toRotationMatrix();
+    g_T_c.translation() << -0.03, 0., -0.06;
 	
     rs2::frameset fs = frame.as<rs2::frameset>();
     if(!fs)return;
@@ -81,7 +81,7 @@ void realsense_callback(const rs2::frame& frame) {
 
     //cv::Mat outputImage;
     //image.copyTo(outputImage);    
-    cout << "[CB] id " << ids.size() << endl;
+    //cout << "[CB] id " << ids.size() << endl;
     if (ids.size() == 1 && ids.front() == 0) {
     	cv::Vec3d rvec, tvec;
 	vector<int> dist;
@@ -107,7 +107,7 @@ void realsense_callback(const rs2::frame& frame) {
 	g_T_t = g_T_c * camera_T_tag;	
 	position_p = g_T_t.translation();
 	//cout << "pos in t: " << tvec[0] << " " << tvec[1] << " " << tvec[2] << endl << flush;
-	cout << "pos in g: " <<position_p[0] << " " << position_p[1] << " " << position_p[2] << endl << endl << flush;
+	//cout << "pos in g: " <<position_p[0] << " " << position_p[1] << " " << position_p[2] << endl << endl << flush;
 
 	//// TODO: run aruco tag detector in opencv
 	//// TODO: compute tag pose (using instrinsics)
@@ -124,6 +124,15 @@ void realsense_callback(const rs2::frame& frame) {
 
 
 int main(int argc, char** argv) {
+    // connect to robot
+    franka::Robot robot(argv[1]);
+    //while(true) {
+    //	std::cout << "Press enter to read from robot";
+    //    Eigen::Isometry3d transform(Eigen::Matrix4d::Map(state.O_T_EE.data()));
+    //    std::cin.ignore();
+    //    franka::RobotState state = robot.readOnce();
+    //    std::cout << "O_T_EE\n" << transform.matrix() << std::endl;
+    //}
   // Check whether the required arguments were passed
   if (argc != 2) {
     cerr << "Usage: " << argv[0] << " <robot-hostname>" << endl;
@@ -169,14 +178,12 @@ int main(int argc, char** argv) {
                                          Eigen::MatrixXd::Identity(3, 3);
 
   try {
-    // connect to robot
-    franka::Robot robot(argv[1]);
+
     setDefaultBehavior(robot);
     // load the kinematics and dynamics model
     franka::Model model = robot.loadModel();
 
     franka::RobotState initial_state = robot.readOnce();
-
     // equilibrium point is the initial position
     Eigen::Isometry3d initial_transform(Eigen::Matrix4d::Map(initial_state.O_T_EE.data()));
     position_d = Eigen::Vector3d(initial_transform.translation());
@@ -210,7 +217,7 @@ int main(int argc, char** argv) {
 
       Eigen::Isometry3d O_T_tag = O_T_EE * g_T_t;
       Eigen::Vector3d den(O_T_tag.translation());
-      //cout << "tag in  base: "<< den[0] << " " << den[1] << " " << den[2] << endl << endl << flush; 
+      cout << "tag in  base: "<< den[0] << " " << den[1] << " " << den[2] << endl << endl << flush; 
 
       // compute error to desired equilibrium pose
       // position error
