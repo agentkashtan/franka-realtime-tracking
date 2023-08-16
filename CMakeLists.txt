@@ -20,6 +20,7 @@ include_directories(
   SYSTEM
   ${EIGEN3_INCLUDE_DIRS}
   ${EIGEN3_INCLUDE_DIR}
+  ${realsense2_INCLUDE_DIR}
 )
 include_directories(${CMAKE_SOURCE_DIR}/include)
 add_executable(move_test src/move_test.cpp src/examples_common.cpp)
