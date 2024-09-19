@@ -20,6 +20,7 @@
 #include <opencv2/core/eigen.hpp>
 #include <opencv2/imgcodecs.hpp>
 #include <opencv2/highgui.hpp>
+#include <opencv2/imgproc.hpp>
 using namespace std;
 
 /**
@@ -133,7 +134,7 @@ void realsense_callback(const rs2::frame& frame) {
     } else {
     	translational_stiffness = 200;
     }
-
+    cv::cvtColor(image, image, cv::COLOR_RGB2BGR);
     cv::imshow("tasde", image);
     cv::waitKey(5);
     } catch (std::exception const & ex ) {
@@ -144,6 +145,9 @@ void realsense_callback(const rs2::frame& frame) {
 
 int main(int argc, char** argv) {
     // connect to robot
+    if(argc<2) {
+    	throw std::runtime_error("Need robot hostname");
+    }
     franka::Robot robot(argv[1]);
     //while(true) {
     //	std::cout << "Press enter to read from robot";
