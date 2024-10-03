@@ -1,4 +1,4 @@
-# Install script for directory: /home/bot/test_pin
+# Install script for directory: /home/robohub/visual_servoing/src_code
 
 # Set the install prefix
 if(NOT DEFINED CMAKE_INSTALL_PREFIX)
@@ -50,5 +50,5 @@ endif()
 
 string(REPLACE ";" "\n" CMAKE_INSTALL_MANIFEST_CONTENT
        "${CMAKE_INSTALL_MANIFEST_FILES}")
-file(WRITE "/home/bot/test_pin/build/${CMAKE_INSTALL_MANIFEST}"
+file(WRITE "/home/robohub/visual_servoing/src_code/build/${CMAKE_INSTALL_MANIFEST}"
      "${CMAKE_INSTALL_MANIFEST_CONTENT}")

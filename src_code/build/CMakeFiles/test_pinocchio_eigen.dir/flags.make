@@ -4,7 +4,7 @@
 # compile CXX with /usr/bin/c++
 CXX_DEFINES = -DBOOST_MPL_LIMIT_LIST_SIZE=30 -DBOOST_MPL_LIMIT_VECTOR_SIZE=30 -DPINOCCHIO_ENABLE_TEMPLATE_INSTANTIATION -DPINOCCHIO_WITH_URDFDOM
 
-CXX_INCLUDES = -isystem /home/bot/lib/include -isystem /usr/include/eigen3
+CXX_INCLUDES = -isystem /home/robohub/lib/include -isystem /usr/include/eigen3
 
 CXX_FLAGS = -std=gnu++17
 

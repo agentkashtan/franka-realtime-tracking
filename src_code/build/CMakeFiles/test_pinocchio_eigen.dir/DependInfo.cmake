@@ -8,7 +8,7 @@ set(CMAKE_DEPENDS_LANGUAGES
 
 # The set of dependency files which are needed:
 set(CMAKE_DEPENDS_DEPENDENCY_FILES
-  "/home/bot/test_pin/pin_test.cpp" "CMakeFiles/test_pinocchio_eigen.dir/pin_test.cpp.o" "gcc" "CMakeFiles/test_pinocchio_eigen.dir/pin_test.cpp.o.d"
+  "/home/robohub/visual_servoing/src_code/pin_test.cpp" "CMakeFiles/test_pinocchio_eigen.dir/pin_test.cpp.o" "gcc" "CMakeFiles/test_pinocchio_eigen.dir/pin_test.cpp.o.d"
   )
 
 # Targets to which this target links.
