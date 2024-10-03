@@ -1,0 +1,3 @@
+/home/bot/test_pin/build/CMakeFiles/test_pinocchio_eigen.dir
+/home/bot/test_pin/build/CMakeFiles/edit_cache.dir
+/home/bot/test_pin/build/CMakeFiles/rebuild_cache.dir
