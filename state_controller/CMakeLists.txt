@@ -1,0 +1,14 @@
+cmake_minimum_required(VERSION 3.10)
+project(TestPinocchioEigen)
+
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
+find_package(pinocchio REQUIRED)
+find_package(Franka REQUIRED)
+find_package(Eigen3 REQUIRED)
+
+add_executable(state_controller state_controller.cpp) 
+
+
+target_link_libraries(state_controller PRIVATE pinocchio::pinocchio Eigen3::Eigen Franka::Franka)
