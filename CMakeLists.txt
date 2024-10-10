@@ -24,5 +24,5 @@ include_directories(
 )
 include_directories(${CMAKE_SOURCE_DIR}/include)
 add_executable(move_test src/move_test.cpp src/examples_common.cpp)
-target_link_libraries(move_test ${OpenCV_LIBS} Franka::Franka realsense2)
+target_link_libraries(move_test ${OpenCV_LIBS} Franka::Franka realsense2::realsense2)
 

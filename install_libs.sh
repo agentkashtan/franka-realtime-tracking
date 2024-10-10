@@ -53,17 +53,25 @@ if [ ! -d libfranka/build ]; then
 	mkdir build
 	cd build
 	cmake .. -DCMAKE_INSTALL_PREFIX=$HOME/lib -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTS=OFF
-	cmake --build .
+	cmake  --build .
+	make install
+	cd
+fi
+
+if [ ! -d librealsense ]; then
+	git clone https://github.com/IntelRealSense/librealsense
+fi
+if [ ! -d librealsense/build ]; then
+	cd librealsense
+	mkdir build
+	cd build
+	cmake .. -DCMAKE_INSTALL_PREFIX=$HOME/lib -DCMAKE_BUILD_TYPE=Release
+	cmake --build . -- -j11
 	make install
 	cd
 fi
 
 SCRIPT_DIR=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
+echo  ${SCRIPT_DIR}
+cp ${SCRIPT_DIR}/visual_servoing/franka_ik_He.hpp $HOME/lib/include
 
-cp ${SCRIPT_DIR}/franka_ik_He.hpp $HOME/lib/include
-
-cd ${SCRIPT_DIR}/src_code
-rm -rf build
-mkdir build
-cd build 
-cmake ..
