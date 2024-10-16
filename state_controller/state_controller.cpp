@@ -31,6 +31,8 @@
 #include <opencv2/highgui.hpp>
 #include <opencv2/imgproc.hpp>
 
+#include <opencv2/objdetect/aruco_detector.hpp>
+#include <opencv2/highgui.hpp>
 
 using namespace std;
 
@@ -39,7 +41,12 @@ float markerLength = 0.06;
 cv::Mat cameraMatrix(3,3, CV_32FC1), distCoeffs;
 
 int frame_number = 0;
-cv::Ptr<cv::aruco::Dictionary> dictionary = cv::aruco::getPredefinedDictionary(cv::aruco::DICT_5X5_50);
+cv::aruco::Dictionary dictionary = cv::aruco::getPredefinedDictionary(cv::aruco::DICT_5X5_50);
+
+
+
+//cv::aruco::Dictionary dictionary = cv::aruco::getPredefinedDictionary(cv::aruco::DICT_5X5_50);
+
 /*
 bool keep_running;
 
@@ -64,13 +71,13 @@ void ik_thread() {
 }
 */
 struct CameraData {
-	bool global_frame = false;
 	bool detected;
 	Eigen::Isometry3d pose;
+        bool global_frame;
 };
 
 
-CameraData cameraData = { false, Eigen::Isometry3d::Identity() };
+CameraData cameraData = { false, Eigen::Isometry3d::Identity(), false };
 
 
 
@@ -95,12 +102,14 @@ void realsense_callback(const rs2::frame& frame) {
     // The image data is stored in a shared pointer
     const void* frame_data = video_frame.get_data();
     try {
-	    cv::Ptr<cv::aruco::DetectorParameters> detectorParams(new cv::aruco::DetectorParameters);
+	   cv::aruco::DetectorParameters d_params = cv::aruco::DetectorParameters();
 	    
 	    cv::Mat image(height, width, CV_8UC(channels), const_cast<void*>(frame_data), stride);
 	    vector<int> ids;
 	    vector<vector<cv::Point2f>> corners, rejected;     
-	    cv::aruco::detectMarkers(image, dictionary, corners, ids, detectorParams, rejected);
+
+ 	    cv::aruco::ArucoDetector detector(dictionary, d_params);
+	    detector.detectMarkers(image, corners, ids, rejected);
 	    
 	    cv::Mat objPoints(4, 1, CV_32FC3);
 	    objPoints.ptr<cv::Vec3f>(0)[0] = cv::Vec3f(-markerLength/2.f, markerLength/2.f, 0);
@@ -237,14 +246,14 @@ private:
 
     void convert_to_global(CameraData& data) {
     	if (!data.global_frame) {
-	    data.global_frama = true;
-	    Eigen::Matrix4d T_ee_o(Eigen::Matrix4d::Map(robot_state.O_T_EE.data()));
-	    data.pose = T_ee_o * data.pose;
+	   data.global_frame = true;
+	   Eigen::Isometry3d T_ee_o(Eigen::Matrix4d::Map(robot_state.O_T_EE.data()));
+	   data.pose = T_ee_o * data.pose;
 	}    
     }
 
     array<double, 7> processIdle() {
-	convert_to_global
+	convert_to_global(cameraData);
         if (cameraData.detected) {
             cout << "Object detected, switching to Observing state.\n";
             startObserving(cameraData.pose.translation());
@@ -256,7 +265,7 @@ private:
 
     void handleMissingFrame() {
         missingFrames++;
-        if (missingFrames > maxMissingFrames) {
+        if (missingFrames >maxMissingFrames) {
             cout << "Too many missing frames, transitioning to Error Recovery.\n";
             state = State::ErrorRecovery;
         }
@@ -274,12 +283,16 @@ private:
 
     array<double, 7> processObserving() {
         Eigen::Vector3d pose;
+	convert_to_global(cameraData);
         if (cameraData.detected) {
             missingFrames = 0;
             positions.push_back(cameraData.pose.translation());
-            if (positions.size() > observationWindow) {
+            cout << cameraData.pose.translation().transpose() << endl;
+	    
+	    if (positions.size() > observationWindow) {
                 pair<Eigen::Vector3d, Eigen::Vector3d> result = fitLine(positions, time_stamp - observationParams.start_time);
-                startApproachPhase(result);
+                cout << "started obs: " << observationParams.start_time << " ended " << time_stamp<< endl; 
+		startApproachPhase(result);
             }
         } else {
             handleMissingFrame();
@@ -492,7 +505,8 @@ private:
             Eigen::VectorXd q_fin = compute_ik(q_init, obj_position, model, data);
             double execution_time = completion_time(q_init, q_fin);
             if (execution_time + sample_duration < cur_time) {
-                return {q_fin, execution_time};
+                cout << "approach data: " << obj_position.transpose() << "; time: " << execution_time + sample_duration << endl; 
+		return {q_fin, execution_time};
             }
             cur_time += sample_duration;
             obj_position += obj_velocity * sample_duration;
@@ -511,11 +525,13 @@ private:
 	Eigen::Vector3d p_start = data.first;
         Eigen::Vector3d velocity = data.second;
         cout << "Starting position: " << p_start.transpose() << endl << "Velocity: " << velocity.transpose() << endl;
-	throw runtime_error("temp stop.");
 
 	pair<Eigen::VectorXd, double> res = compute_approach_point(p_start, velocity, q_base);
         Eigen::VectorXd approach_config = res.first;
-        double exe_time = res.second;
+  
+	throw runtime_error("temp stop.");
+
+	double exe_time = res.second;
         state = State::Approching;
         approachParams = {time_stamp, approach_config, exe_time};
     }
@@ -671,16 +687,16 @@ private:
 int main(int argc, char ** argv) {
     using namespace pinocchio;
     //camera set up
-    cv::Mat markerImage;
-    cv::aruco::drawMarker(dictionary, 0, 200, markerImage, 1);
-    cv::imwrite("marker.png", markerImage);
-
+//    cv::Mat markerImage;
+    //cv::drawMarker(dictionary, 0, 200, markerImage, 1);
+   // cv::imwrite("marker.png", markerImage);
+    
     rs2::pipeline pipe;
     rs2::config cfg;
     const int fps = 6;
     cfg.enable_stream(RS2_STREAM_COLOR, 1920, 1080, RS2_FORMAT_RGB8, fps);
     cfg.enable_stream(RS2_STREAM_DEPTH, 848, 480, RS2_FORMAT_Z16, fps);
-    cfg.enable_device("825312072012");
+    cfg.enable_device("944122072327");
     pipe.start(cfg,realsense_callback);
     auto intrinsics = pipe.get_active_profile().get_stream(rs2_stream::RS2_STREAM_COLOR).as<rs2::video_stream_profile>().get_intrinsics();
 
@@ -704,10 +720,9 @@ int main(int argc, char ** argv) {
     franka::RobotState initial_state = robot.readOnce();
     string mode = argv[2];
 
-    StateController controller(model, 20, 1000);
+    StateController controller(model, 30, 2500);
     Eigen::Map<const Eigen::Matrix<double, 7, 1>> q_init(initial_state.q.data());
-	
-
+  
     auto control_callback = [&](const franka::RobotState& robot_state,
                                       franka::Duration period) -> franka::Torques {
         time += period.toSec();
@@ -724,14 +739,17 @@ int main(int argc, char ** argv) {
                 Eigen::VectorXd tau_cmd = Eigen::VectorXd::Zero(7);
                 //tau_cmd = first_phase_controller(time, q_init, q_test_init, q, dq, mass);
                 tau_cmd += coriolis;
-                Eigen::VectorXd::Map(&tau_d_array[0], 7) = tau_cmd;
+                Eigen::VectorXd::Map(&t
         }
         else {
             tau_d_array = controller.update(time, robot_state);
         }*/
         //return tau_d_array;
-	tau_d_array = controller.update(time, robot_state);
-	return ZERO_TORQUES;
+	    tau_d_array = controller.update(time, robot_state);
+           
+          
+    	    return ZERO_TORQUES;
+
     };
     robot.control(control_callback);
 

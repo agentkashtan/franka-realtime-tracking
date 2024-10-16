@@ -146,7 +146,7 @@ Eigen::VectorXd visual_servoing_controller(Eigen::VectorXd q, Eigen::VectorXd q_
     Eigen::Vector3d error_pos = obj_position - T_ee_0.topRightCorner<3,1>();
 
     Eigen::Matrix3d r_desired = Eigen::Matrix3d::Identity();
-    r_desired(0,0) = -1;
+    r_desired(1,1) = -1;
     r_desired(2,2) = -1;
     Eigen::Matrix3d r_diff = r_desired * T_ee_0.topLeftCorner<3,3>().transpose();
 
@@ -157,7 +157,7 @@ Eigen::VectorXd visual_servoing_controller(Eigen::VectorXd q, Eigen::VectorXd q_
     error_p.head(3) = error_pos;
     error_p.tail(3) = error_orient;
 
-    cout <<"total error: " <<  error_p << endl;
+
     Eigen::VectorXd q_dot_des_ts = Eigen::VectorXd::Zero(6);
     q_dot_des_ts.head(3) = obj_velocity;
     Eigen::VectorXd q_dot_des_js = w.inverse() * jacobian.transpose() * (jacobian * w.inverse() * jacobian.transpose()).inverse() * q_dot_des_ts;
@@ -219,7 +219,7 @@ Eigen::VectorXd compute_ik(Eigen::VectorXd q_init, Eigen::Vector3d position, pin
     Eigen::Matrix4d transformation = Eigen::Matrix4d::Identity();
     transformation(0, 3) = position.x();
     transformation(1, 3) = position.y();
-    transformation(2, 3) = position.z() + 0.1; // depends on orient
+    transformation(2, 3) = position.z() + 0.05; // depends on orient
     transformation(0,0) = -1;
     transformation(2,2) = -1;
 
@@ -263,6 +263,46 @@ Eigen::VectorXd compute_ik(Eigen::VectorXd q_init, Eigen::Vector3d position, pin
 }
 
 
+
+
+
+
+
+Eigen::VectorXd d_compute_ik(Eigen::VectorXd q_init, Eigen::Vector3d position) {
+    // TODO: handle different oreinetions
+    Eigen::Matrix4d transformation = Eigen::Matrix4d::Identity();
+    transformation(0, 3) = position.x();
+    transformation(1, 3) = position.y();
+    transformation(2, 3) = position.z(); // depends on orient
+    transformation(1,1) = -1;
+    transformation(2,2) = -1;
+
+    double max_manupuability = 0;
+    Eigen::VectorXd best_solution(7);
+
+    array<double, 16> flat_array;
+    Eigen::Map<Eigen::Matrix<double, 4, 4, Eigen::ColMajor>>(flat_array.data()) = transformation;
+    array<double, 7> q_init_arr;
+    for (int i = 0; i < 7; ++i) {
+        q_init_arr[i] = q_init(i);
+    }
+
+    for (double q7 = -2.89; q7 <= 2.89; q7 += 0.05) {
+        auto solutions = franka_IK_EE(flat_array, q7, q_init_arr);
+        for (array<double, 7> q_arr: solutions) {
+            bool valid_sol = true;
+            for (auto i: q_arr) if (isnan(i)) valid_sol = false;
+            if (!valid_sol) continue;
+
+            Eigen::VectorXd q = Eigen::Map<Eigen::VectorXd>(q_arr.data(), q_arr.size());
+           return q;
+        }
+    }
+    //std::cout << "max man " << max_manupuability << std::endl;
+    if (max_manupuability > 0) return best_solution;
+    throw runtime_error("Couldnt #2ik reach the object.");
+}
+
 pair<Eigen::VectorXd, double> compute_approach_point(Eigen::Vector3d obj_position, Eigen::Vector3d obj_velocity, const Eigen::VectorXd& q_init) {
     const Workspace ws = {{0.2, -0.4}, {0.6, 0.4}};
     double cur_time = time_to_reach_workspace({obj_position.x(), obj_position.y()}, {obj_velocity.x(), obj_velocity.y()}, ws);
@@ -283,7 +323,8 @@ pair<Eigen::VectorXd, double> compute_approach_point(Eigen::Vector3d obj_positio
         Eigen::VectorXd q_fin = compute_ik(q_init, obj_position, model, data);
         double execution_time = completion_time(q_init, q_fin);
         if (execution_time + sample_duration < cur_time) {
-            return {q_fin, execution_time};
+            	cout << "loh " << obj_position << endl;
+		return {q_fin, execution_time};
         }
         cur_time += sample_duration;
         obj_position += obj_velocity * sample_duration;
@@ -322,25 +363,59 @@ int main(int argc, char ** argv)
 
 
     Eigen::Vector3d obj_start_pos = Eigen::Vector3d(0.5, -0.4875, 0.1);
-    Eigen::Vector3d obj_velocity = Eigen::Vector3d(0.0 , 0.05, 0.0);
+    Eigen::Vector3d obj_velocity = Eigen::Vector3d(0.0 , 0.135, 0.0);
 
 
-    auto control_data = compute_approach_point(obj_start_pos, obj_velocity, q_sim.head(7));
+   // auto control_data = compute_approach_point(obj_start_pos, obj_velocity, q_sim.head(7));
 
-    double ff_time = control_data.second;
+    double ff_time ;//= control_data.second;
     cout << "ff time: " << ff_time << endl;
-    Eigen::VectorXd q_ff = control_data.first;
+    Eigen::VectorXd q_ff;// = control_data.first;
 
 
    // franka::Robot robot("123.213.213.111");
     franka::Robot robot(argv[1]);
-    robot.automaticErrorRecovery();
     franka::Model model = robot.loadModel();
     double time = 0.0;
     franka::RobotState initial_state = robot.readOnce(); 
-    string mode = argv[2];
-   		
+    cout << argv[2] << endl;
+     
+
+
+
+
+
+
+
+
+Eigen::Vector3d move_to;
+     if (argc > 3) { // Ensure there is at least one argument
+        string arg = argv[3]; // Get the first argument
+
+        // Use a stringstream to split the string
+        std::stringstream ss(arg);
+        std::string item;
+        double values[3]; // Array to hold the parsed numbers
+
+        // Parse the three values
+        for (int i = 0; i < 3; ++i) {
+            std::getline(ss, item, ','); // Split by comma
+            values[i] = std::stod(item); // Convert string to double
+        }
+
+        // Create an Eigen::Vector3d with the parsed values
+       move_to = Eigen::Vector3d(values[0], values[1], values[2]);
+       
+    } else {
+        std::cerr << "No arguments provided." << std::endl;
+        return 1; // Exit with an error cod
+    }
+
     Eigen::Map<const Eigen::Matrix<double, 7, 1>> q_init(initial_state.q.data());
+    Eigen::VectorXd q_test = d_compute_ik(q_init, move_to);
+    cout << "test: " << q_test << endl;
+   
+    string mode = argv[2]; 
     auto control_callback = [&](const franka::RobotState& robot_state,
                                       franka::Duration period) -> franka::Torques {
         time += period.toSec();
@@ -355,16 +430,17 @@ int main(int argc, char ** argv)
         Eigen::Map<const Eigen::Matrix<double, 7, 1>> dq(robot_state.dq.data());
         Eigen::VectorXd tau_cmd = Eigen::VectorXd::Zero(7);
 
-	if (mode == "true")  tau_cmd = first_phase_controller(time, q_init, q_test_init, q, dq, mass);
-	else {       
+	if (mode == "true") { 
+		tau_cmd = first_phase_controller(time, q_init, q_test, q, dq, mass);
+		Eigen::Matrix4d T_ee_o(Eigen::Matrix4d::Map(robot_state.O_T_EE.data()));
+		cout << T_ee_o(0, 3) << " " << T_ee_o(1,3) << " " << T_ee_o(2,3) << endl; 
+	} else {       
+	cout << "r" << endl;
 	if (time <= ff_time) {
             tau_cmd = first_phase_controller(time, q_test_init, q_ff, q, dq, mass);
         } else {
-            	Eigen::Matrix4d T_ee_o(Eigen::Matrix4d::Map(robot_state.O_T_EE.data()));
-            	//cout << T_ee_o << endl;
-	   	//cout << obj_start_pos + obj_velocity * time << endl;
-		tau_cmd = visual_servoing_controller(q, dq, obj_start_pos + obj_velocity * time, obj_velocity, jacobian, T_ee_o);
-
+            Eigen::Matrix4d T_ee_o(Eigen::Matrix4d::Map(robot_state.O_T_EE.data()));
+            tau_cmd = visual_servoing_controller(q, dq, obj_start_pos + obj_velocity * time, obj_velocity, jacobian, T_ee_o);
         }
 	}
         //Eigen::VectorXd visual_servoing_controller(Eigen::VectorXd q, Eigen::VectorXd q_dot, Eigen::Vector3d obj_position, Eigen::Vector3d obj_velocity, Eigen::Matrix<double, 6, 7>jacobian, Eigen::Matrix4d T_ee_0) {
@@ -378,12 +454,11 @@ int main(int argc, char ** argv)
 
     };
     robot.control(control_callback);
-    /* sim code
     std::vector<Eigen::VectorXd> logs;
     std::vector<Eigen::VectorXd> logs_obj;
 
     Eigen::VectorXd q_sf_f;
-    for (int t = 0; t <= 15000; t ++){
+    for (int t = 0; t <= 7000; t ++){
         forwardKinematics(sim_model, sim_data, q_sim, q_dot_sim);
         updateFramePlacements(sim_model, sim_data);
         computeAllTerms(sim_model, sim_data, q_sim, q_dot_sim);
@@ -399,10 +474,6 @@ int main(int argc, char ** argv)
         Eigen::VectorXd tau = Eigen::VectorXd::Zero(7);
         if (t*dt <= ff_time) tau = first_phase_controller(dt * t, q_test_init, q_ff, q_sim.head(7), q_dot_sim.head(7), M);
         else if (t*dt <= 4){
-	     //cout << jacobian_sim.topLeftCorner(6, 7) << endl;
-	     cout <<" Ednasd";
-		throw runtime_error("ff ended");
-
             tau = visual_servoing_controller(q_sim.head(7), q_dot_sim.head(7), obj_start_pos + obj_velocity*t*dt, obj_velocity, jacobian_sim.topLeftCorner(6, 7), T_ee_0_sim);
             q_sf_f = q_sim;
         } else tau = first_phase_controller(dt * t, q_sf_f.head(7), q_test_init, q_sim.head(7), q_dot_sim.head(7), M);
@@ -435,6 +506,6 @@ int main(int argc, char ** argv)
         }
         std::cout << std::endl;
     }
-	*/
+
     return 0;
 }
