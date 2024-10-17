@@ -355,6 +355,8 @@ int main(int argc, char ** argv)
     Eigen::VectorXd q_test_fin(7);
     q_test_fin << -2.02504024, -1.56926117,  1.70563035, -2.63044967,  2.4754281, 1.65576549, 2.34613614;
     q_sim.head(7) = q_test_init;
+    Eigen::VectorXd q_prob(7);
+    q_prob << 1.75766, -1.18572,  -1.6834 ,-2.30987, -1.34919,  1.90709,    -1.49;
 
     forwardKinematics(sim_model, sim_data, q_sim, q_dot_sim);
     updateFramePlacements(sim_model, sim_data);
@@ -388,7 +390,12 @@ int main(int argc, char ** argv)
 
 
 
-Eigen::Vector3d move_to;
+        string mode = argv[2];
+ Eigen::Map<const Eigen::Matrix<double, 7, 1>> q_init(initial_state.q.data());
+
+     Eigen::Vector3d move_to;
+             Eigen::VectorXd q_test;
+     if (mode=="true"){
      if (argc > 3) { // Ensure there is at least one argument
         string arg = argv[3]; // Get the first argument
 
@@ -408,14 +415,18 @@ Eigen::Vector3d move_to;
        
     } else {
         std::cerr << "No arguments provided." << std::endl;
-        return 1; // Exit with an error cod
+        return 1; // Exit with
+		  // an error cod
     }
+      q_test = d_compute_ik(q_init, move_to);
 
-    Eigen::Map<const Eigen::Matrix<double, 7, 1>> q_init(initial_state.q.data());
-    Eigen::VectorXd q_test = d_compute_ik(q_init, move_to);
-    cout << "test: " << q_test << endl;
+     }
    
-    string mode = argv[2]; 
+    cout << "test: " << q_test << endl;
+     
+   
+
+     
     auto control_callback = [&](const franka::RobotState& robot_state,
                                       franka::Duration period) -> franka::Torques {
         time += period.toSec();
@@ -434,14 +445,16 @@ Eigen::Vector3d move_to;
 		tau_cmd = first_phase_controller(time, q_init, q_test, q, dq, mass);
 		Eigen::Matrix4d T_ee_o(Eigen::Matrix4d::Map(robot_state.O_T_EE.data()));
 		cout << T_ee_o(0, 3) << " " << T_ee_o(1,3) << " " << T_ee_o(2,3) << endl; 
-	} else {       
-	cout << "r" << endl;
+	} else {
+	 tau_cmd = first_phase_controller(time, q_init, q_prob, q, dq, mass);
+
+	/*cout << "r" << endl;
 	if (time <= ff_time) {
             tau_cmd = first_phase_controller(time, q_test_init, q_ff, q, dq, mass);
         } else {
             Eigen::Matrix4d T_ee_o(Eigen::Matrix4d::Map(robot_state.O_T_EE.data()));
             tau_cmd = visual_servoing_controller(q, dq, obj_start_pos + obj_velocity * time, obj_velocity, jacobian, T_ee_o);
-        }
+        }*/
 	}
         //Eigen::VectorXd visual_servoing_controller(Eigen::VectorXd q, Eigen::VectorXd q_dot, Eigen::Vector3d obj_position, Eigen::Vector3d obj_velocity, Eigen::Matrix<double, 6, 7>jacobian, Eigen::Matrix4d T_ee_0) {
          

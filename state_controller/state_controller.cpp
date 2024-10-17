@@ -88,6 +88,7 @@ struct APResult {
 	std::atomic<bool> finished{false};
 	Eigen::VectorXd q_config;
 	double exe_time;
+	std::mutex apResultMutex;
 };
 
 APResult apResult;
@@ -210,7 +211,7 @@ public:
           state(State::Idle),
           missingFrames(0)
           {
-            q_base <<  1.4784838,   0.58908088, -1.51156758, -2.32406426,  0.75959274,  2.20523463, -2.89;
+            //q_base <<  1.4784838,   0.58908088, -1.51156758, -2.32406426,  0.75959274,  2.20523463, -2.89;
 
 	    Kp.diagonal() << 200, 200, 200, 200, 200, 200,200;
             Kd.diagonal() << 20, 20, 20, 20, 20, 20, 8;
@@ -241,6 +242,7 @@ public:
                 break;
         }
     }
+    Eigen::Matrix<double, 7, 1> q_base;
 
 
 private:
@@ -248,7 +250,6 @@ private:
     int observationWindow;
     State state;
     int missingFrames;
-    Eigen::Matrix<double, 7, 1> q_base;
     vector<Eigen::Vector3d> positions;
     double time_stamp;
     franka::RobotState robot_state;
@@ -273,6 +274,20 @@ private:
 	   data.pose = T_ee_o * data.pose;
 	}    
     }
+    
+    array<double, 7> maintain_base_pos() {
+
+        array<double, 7> coriolis_array = model.coriolis(robot_state);
+
+        Eigen::Map<const Eigen::Matrix<double, 7, 1>> coriolis(coriolis_array.data());
+        Eigen::Map<const Eigen::Matrix<double, 7, 1>> q(robot_state.q.data());
+        Eigen::Map<const Eigen::Matrix<double, 7, 1>> dq(robot_state.dq.data());
+
+	Eigen::VectorXd tau_cmd =  Kp * ( q_base - q) + Kd * (- dq) + coriolis;
+        std::array<double, 7> tau_d_array{};
+        Eigen::VectorXd::Map(&tau_d_array[0], 7) = tau_cmd;
+        return tau_d_array;
+    }
 
     array<double, 7> processIdle() {
 	convert_to_global(cameraData);
@@ -282,7 +297,7 @@ private:
         } else {
             cout << "Idle state, waiting for object detection.\n";
 	}
-	return ZERO_TORQUES;
+	return maintain_base_pos();
     }
 
     void handleMissingFrame() {
@@ -309,8 +324,7 @@ private:
         if (cameraData.detected) {
             missingFrames = 0;
             positions.push_back(cameraData.pose.translation());
-            cout << cameraData.pose.translation().transpose() << endl;
-	    
+	    //cout << cameraData.pose.translation().transpose() << endl;
 	    if (positions.size() > observationWindow) {    
 		pair<Eigen::Vector3d, Eigen::Vector3d> result = fitLine(positions, time_stamp - observationParams.start_time);
                 cout << "started obs: " << observationParams.start_time << " ended " << time_stamp<< endl; 
@@ -320,7 +334,7 @@ private:
         } else {
             handleMissingFrame();
         }
-        return ZERO_TORQUES;
+        return maintain_base_pos();
     }
 
     // Everything for first phase
@@ -373,8 +387,8 @@ private:
         Eigen::Matrix4d transformation = Eigen::Matrix4d::Identity();
         transformation(0, 3) = position.x();
         transformation(1, 3) = position.y();
-        transformation(2, 3) = position.z() + 0.1; // depends on orient
-        transformation(0,0) = -1;
+        transformation(2, 3) = position.z() + 0.05; // depends on orient
+        transformation(1,1) = -1;
         transformation(2,2) = -1;
 
         double max_manupuability = 0;
@@ -510,15 +524,19 @@ private:
 
 
     pair<Eigen::VectorXd, double> compute_approach_point() {
-        Eigen::Vector3d obj_position = approachPointComputingParams.p_start;
+        auto start = std::chrono::high_resolution_clock::now();
+
+	    
+	Eigen::Vector3d obj_position_init= approachPointComputingParams.p_start;
         Eigen::Vector3d obj_velocity = approachPointComputingParams.velocity;
 	Eigen::VectorXd q_init = q_base;
 	    
 	    
 	const Workspace ws = {{0.2, -0.4}, {0.6, 0.4}};
-        double cur_time = time_to_reach_workspace({obj_position.x(), obj_position.y()}, {obj_velocity.x(), obj_velocity.y()}, ws);
-        if (cur_time == -1) throw runtime_error("The object is out of the workspace.");
-        obj_position += obj_velocity * cur_time;
+        double init_time = time_to_reach_workspace({obj_position_init.x(), obj_position_init.y()}, {obj_velocity.x(), obj_velocity.y()}, ws);
+        double cur_time = init_time;
+	if (cur_time == -1) throw runtime_error("The object is out of the workspace.");
+	Eigen::Vector3d obj_position = obj_position_init +  obj_velocity * init_time;
         double sample_duration = 0.01;
         int iteration_num = 0;
 
@@ -532,12 +550,18 @@ private:
 
             Eigen::VectorXd q_fin = compute_ik(q_init, obj_position, model, data);
             double execution_time = completion_time(q_init, q_fin);
-            if (execution_time + sample_duration < cur_time) {
+            //cout << obj_position.transpose() << "  " << execution_time << " " << cur_time << endl;
+	    if (execution_time + sample_duration < cur_time) {
                 cout << "approach data: " << obj_position.transpose() << "; time: " << execution_time + sample_duration << endl; 
 		return {q_fin, execution_time};
             }
-            cur_time += sample_duration;
-            obj_position += obj_velocity * sample_duration;
+	    auto end = std::chrono::high_resolution_clock::now();
+            std::chrono::duration<double> duration = end - start;
+
+	    iteration_num ++;
+            cur_time = init_time + sample_duration * iteration_num + duration.count(); 
+            obj_position = obj_position_init +  obj_velocity * cur_time;
+	    //cout << obj_position.transpose() << "  " << execution_time << " " << cur_time <<" ;running time: " << duration.count() << endl;
         }
         throw runtime_error("Could not reach the object.");
     }
@@ -551,9 +575,12 @@ private:
     	apResult.finished.store(false);
 	cout << "strated thread" << endl;
     	pair<Eigen::VectorXd, double> res = compute_approach_point();
-    	cout << " computed daa" << endl;
-	apResult.q_config = res.first;
-    	apResult.exe_time = res.second;
+    	cout << " computed approach point" << endl;
+	{
+	    std::lock_guard<std::mutex> lock(apResult.apResultMutex);
+	    apResult.q_config = res.first;
+            apResult.exe_time = res.second;
+	}
     	apResult.finished.store(true);
     }
     
@@ -567,24 +594,26 @@ private:
 
     array<double, 7> processApproachPointComputationPhase() {
 	if (apResult.finished.load()) { 
+            std::lock_guard<std::mutex> lock(apResult.apResultMutex);		
             startApproachPhase(apResult.q_config, apResult.exe_time);	    
-	}// else cout << "waiting for commputations to finish " << endl; 
-        return ZERO_TORQUES;
+	} //else cout << "waiting for commputations to finish " << endl; 
+        return maintain_base_pos();
     }
 
 
 
     
     // Handle approaching state
-    void startApproachPhase(Eigen::Vector3d approach_config, double exe_time) {
+    void startApproachPhase(Eigen::VectorXd approach_config, double exe_time) {
         cout << approach_config.transpose() << endl;
 	cout << exe_time << endl;
-	throw runtime_error("computed approach point");
+	//throw runtime_error("computed approach point");
 	state = State::Approaching;
         approachParams = {time_stamp, approach_config, exe_time};
     }
 
     array<double, 7> processApproachPhase() {
+
         if (approachParams.start_time <= time_stamp && time_stamp <= approachParams.start_time + approachParams.exe_time) {
             array<double, 7> coriolis_array = model.coriolis(robot_state);
             array<double, 49> mass_array = model.mass(robot_state);
@@ -595,12 +624,21 @@ private:
             Eigen::Matrix4d T_ee_o(Eigen::Matrix4d::Map(robot_state.O_T_EE.data()));
 
             Eigen::VectorXd tau_cmd = Eigen::VectorXd::Zero(7);
-            tau_cmd  = first_phase_controller(time_stamp, q_base, approachParams.approach_config, q, dq, mass);
+            tau_cmd  = first_phase_controller(time_stamp - approachParams.start_time, q_base, approachParams.approach_config, q, dq, mass);
             tau_cmd += coriolis;
             std::array<double, 7> tau_d_array{};
             Eigen::VectorXd::Map(&tau_d_array[0], 7) = tau_cmd;
             return tau_d_array;
         } else {
+	    Eigen::Map<const Eigen::Matrix<double, 7, 1>> q(robot_state.q.data());
+            cout << "actual: " << q.transpose() << endl << "desired: "<< approachParams.approach_config.transpose() << endl;
+	    cout << "diff: " << q.transpose() - approachParams.approach_config.transpose();
+	    cout << "cur time: " <<  time_stamp << " " << approachParams.start_time + approachParams.exe_time << endl;   
+	    Eigen::Matrix4d T_ee_o(Eigen::Matrix4d::Map(robot_state.O_T_EE.data()));
+	    cout <<"ee pose: " << T_ee_o(0,3) << " " << T_ee_o(1,3) << " " << T_ee_o(2,3) << endl;
+	    convert_to_global(cameraData);
+	    cout << cameraData.pose.translation() << endl;
+	    throw runtime_error("approached");
             startVisualServoing();
         }
     }
@@ -620,7 +658,7 @@ private:
         Eigen::Vector3d error_pos = obj_position - T_ee_0.topRightCorner<3,1>();
 
         Eigen::Matrix3d r_desired = Eigen::Matrix3d::Identity();
-        r_desired(0,0) = -1;
+        r_desired(1,1) = -1;
         r_desired(2,2) = -1;
         Eigen::Matrix3d r_diff = r_desired * T_ee_0.topLeftCorner<3,3>().transpose();
 
@@ -728,7 +766,7 @@ private:
         std::cout << "Direction of the fitted line: " << direction.transpose() << std::endl;
         std::cout << "Line equation: p(t) = [" << centroid.transpose() << "] + t * [" << direction.transpose() << "]" << std::endl;
         std::cout << "Starting point: " << p_start.transpose() << std::endl;
-        return {p_start, (p_end - p_start) / time};
+        return {p_end, (p_end - p_start) / time};
     }
 };
 
@@ -770,7 +808,7 @@ int main(int argc, char ** argv) {
 
     StateController controller(model, 30, 2500);
     Eigen::Map<const Eigen::Matrix<double, 7, 1>> q_init(initial_state.q.data());
-  
+    controller.q_base = q_init;
     auto control_callback = [&](const franka::RobotState& robot_state,
                                       franka::Duration period) -> franka::Torques {
         time += period.toSec();
@@ -795,8 +833,8 @@ int main(int argc, char ** argv) {
         //return tau_d_array;
 	    tau_d_array = controller.update(time, robot_state);
            
-          
-    	    return ZERO_TORQUES;
+  
+    	    return tau_d_array;
 
     };
     robot.control(control_callback);
