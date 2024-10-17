@@ -17,6 +17,12 @@
 #include <array>
 #include <vector>
 #include <variant>
+#include <thread>
+#include <atomic>
+#include <chrono>
+#include <mutex>
+
+
 
 #include <franka/duration.h>
 #include <franka/exception.h>
@@ -37,7 +43,7 @@
 using namespace std;
 
 
-float markerLength = 0.06;
+float markerLength = 0.07;
 cv::Mat cameraMatrix(3,3, CV_32FC1), distCoeffs;
 
 int frame_number = 0;
@@ -76,10 +82,15 @@ struct CameraData {
         bool global_frame;
 };
 
-
 CameraData cameraData = { false, Eigen::Isometry3d::Identity(), false };
 
+struct APResult {
+	std::atomic<bool> finished{false};
+	Eigen::VectorXd q_config;
+	double exe_time;
+};
 
+APResult apResult;
 
 void realsense_callback(const rs2::frame& frame) {
     Eigen::Isometry3d g_T_c;
@@ -155,7 +166,8 @@ void realsense_callback(const rs2::frame& frame) {
 enum class State {
     Idle,
     Observing,
-    Approching,
+    ComputingApproachPoint,
+    Approaching,
     VisualServoing,
     ErrorRecovery,
 
@@ -167,6 +179,12 @@ struct IdleParams {
 
 struct ObservationParams {
     double start_time;
+};
+
+struct ApproachPointComputingParams {
+    double start_time;
+    Eigen::Vector3d p_start;
+    Eigen::Vector3d velocity;
 };
 
 struct ApproachParams {
@@ -212,7 +230,10 @@ public:
             case State::ErrorRecovery:
                 return processErrorRecovery();
                 break;
-            case State::Approching:
+	    case State::ComputingApproachPoint:
+		return processApproachPointComputationPhase();
+		break;
+            case State::Approaching:
                 return processApproachPhase();
                 break;
             case State::VisualServoing:
@@ -238,6 +259,7 @@ private:
     ObservationParams observationParams;
     ApproachParams approachParams;
     VisualServoingParams visualServoingParams;
+    ApproachPointComputingParams approachPointComputingParams;
 
     bool getPose(Eigen::Vector3d& pose) {
         pose = Eigen::Vector3d::Zero();
@@ -259,8 +281,8 @@ private:
             startObserving(cameraData.pose.translation());
         } else {
             cout << "Idle state, waiting for object detection.\n";
-        }
-        return ZERO_TORQUES;
+	}
+	return ZERO_TORQUES;
     }
 
     void handleMissingFrame() {
@@ -279,7 +301,7 @@ private:
         positions.clear();
         positions.push_back(initialPosition);
         missingFrames = 0;
-    }
+     }
 
     array<double, 7> processObserving() {
         Eigen::Vector3d pose;
@@ -289,10 +311,11 @@ private:
             positions.push_back(cameraData.pose.translation());
             cout << cameraData.pose.translation().transpose() << endl;
 	    
-	    if (positions.size() > observationWindow) {
-                pair<Eigen::Vector3d, Eigen::Vector3d> result = fitLine(positions, time_stamp - observationParams.start_time);
+	    if (positions.size() > observationWindow) {    
+		pair<Eigen::Vector3d, Eigen::Vector3d> result = fitLine(positions, time_stamp - observationParams.start_time);
                 cout << "started obs: " << observationParams.start_time << " ended " << time_stamp<< endl; 
-		startApproachPhase(result);
+		approachPointComputingParams = { time_stamp,  result.first, result.second };
+		startApproachPointComputationPhase();
             }
         } else {
             handleMissingFrame();
@@ -486,8 +509,13 @@ private:
     }
 
 
-    pair<Eigen::VectorXd, double> compute_approach_point(Eigen::Vector3d obj_position, Eigen::Vector3d obj_velocity, const Eigen::VectorXd& q_init) {
-        const Workspace ws = {{0.2, -0.4}, {0.6, 0.4}};
+    pair<Eigen::VectorXd, double> compute_approach_point() {
+        Eigen::Vector3d obj_position = approachPointComputingParams.p_start;
+        Eigen::Vector3d obj_velocity = approachPointComputingParams.velocity;
+	Eigen::VectorXd q_init = q_base;
+	    
+	    
+	const Workspace ws = {{0.2, -0.4}, {0.6, 0.4}};
         double cur_time = time_to_reach_workspace({obj_position.x(), obj_position.y()}, {obj_velocity.x(), obj_velocity.y()}, ws);
         if (cur_time == -1) throw runtime_error("The object is out of the workspace.");
         obj_position += obj_velocity * cur_time;
@@ -518,21 +546,41 @@ private:
         auto [q_des, q_dot_des, q_ddot_des] = get_q(t, q_init, q_fin);
         return Kp * (q_des - q_cur) + Kd * (q_dot_des  - q_dot_cur) + M * q_ddot_des;
     }
+    // Handle approach point calculation
+    void compute_approach_point_mth()  {
+    	apResult.finished.store(false);
+	cout << "strated thread" << endl;
+    	pair<Eigen::VectorXd, double> res = compute_approach_point();
+    	cout << " computed daa" << endl;
+	apResult.q_config = res.first;
+    	apResult.exe_time = res.second;
+    	apResult.finished.store(true);
+    }
+    
+    void startApproachPointComputationPhase() {
+        cout << "Started computing approach point" << endl;   
+        apResult.finished.store(false);
+	std::thread newThread(&StateController::compute_approach_point_mth, this);
+	newThread.detach();
+        state = State::ComputingApproachPoint;
+    }
 
+    array<double, 7> processApproachPointComputationPhase() {
+	if (apResult.finished.load()) { 
+            startApproachPhase(apResult.q_config, apResult.exe_time);	    
+	}// else cout << "waiting for commputations to finish " << endl; 
+        return ZERO_TORQUES;
+    }
+
+
+
+    
     // Handle approaching state
-    void startApproachPhase(pair<Eigen::Vector3d, Eigen::Vector3d> data) {
-        cout << "Started approaching phase" << endl;
-	Eigen::Vector3d p_start = data.first;
-        Eigen::Vector3d velocity = data.second;
-        cout << "Starting position: " << p_start.transpose() << endl << "Velocity: " << velocity.transpose() << endl;
-
-	pair<Eigen::VectorXd, double> res = compute_approach_point(p_start, velocity, q_base);
-        Eigen::VectorXd approach_config = res.first;
-  
-	throw runtime_error("temp stop.");
-
-	double exe_time = res.second;
-        state = State::Approching;
+    void startApproachPhase(Eigen::Vector3d approach_config, double exe_time) {
+        cout << approach_config.transpose() << endl;
+	cout << exe_time << endl;
+	throw runtime_error("computed approach point");
+	state = State::Approaching;
         approachParams = {time_stamp, approach_config, exe_time};
     }
 
