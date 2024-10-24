@@ -82,6 +82,7 @@ struct CameraData {
         bool global_frame;
 };
 
+std::mutex cameraDataMutex;
 CameraData cameraData = { false, Eigen::Isometry3d::Identity(), false };
 
 struct APResult {
@@ -94,6 +95,7 @@ struct APResult {
 APResult apResult;
 
 void realsense_callback(const rs2::frame& frame) {
+
     Eigen::Isometry3d g_T_c;
     g_T_c.setIdentity();
     g_T_c.linear() = Eigen::AngleAxisd(-1.57, Eigen::Vector3d::UnitZ()).toRotationMatrix();
@@ -131,7 +133,6 @@ void realsense_callback(const rs2::frame& frame) {
             Eigen::Isometry3d camera_T_tag;
 
 	    if (ids.size() == 1 && ids.front() == 0) {
-	    	frame_number = 0;
 		cv::Vec3d rvec, tvec;
 		vector<int> dist;
 		cv::solvePnP(objPoints, corners.at(0), cameraMatrix, dist, rvec, tvec);
@@ -149,8 +150,12 @@ void realsense_callback(const rs2::frame& frame) {
 		Eigen::Vector3d eigen_translation;
 		cv::cv2eigen(tvec,eigen_translation);
 		camera_T_tag.translation() = eigen_translation;
+	    	
+		std::lock_guard<std::mutex> lock(cameraDataMutex);
+		frame_number = 0;
 		cameraData = { true, g_T_c * camera_T_tag, false };
 	    } else {
+		std::lock_guard<std::mutex> lock(cameraDataMutex);
 	    	frame_number ++;
 		cameraData = { false, g_T_c * camera_T_tag, false };
 	    }
@@ -186,6 +191,7 @@ struct ApproachPointComputingParams {
     double start_time;
     Eigen::Vector3d p_start;
     Eigen::Vector3d velocity;
+    Eigen::Matrix3d orientation;	 
 };
 
 struct ApproachParams {
@@ -212,35 +218,51 @@ public:
           missingFrames(0)
           {
             //q_base <<  1.4784838,   0.58908088, -1.51156758, -2.32406426,  0.75959274,  2.20523463, -2.89;
+            log_ik_ = std::ofstream("/dev/shm/ik.log");
+	    log_ = std::ofstream("/dev/shm/controller.log");
 
+	    start = std::chrono::high_resolution_clock::now();
 	    Kp.diagonal() << 200, 200, 200, 200, 200, 200,200;
             Kd.diagonal() << 20, 20, 20, 20, 20, 20, 8;
           }
 
+    string time(){
+        auto end = std::chrono::high_resolution_clock::now();
+        std::chrono::duration<double> duration = end - start;
+        return std::to_string(duration.count());
+    }
 
-    array<double, 7> update(double time, franka::RobotState robotState) {
-        time_stamp = time;
+
+    array<double, 7> update(double time1, franka::RobotState robotState) {
+	log_ << time() <<  " update entry" << std::endl;
+        time_stamp = time1;
         robot_state = robotState;
         switch (state) {
             case State::Idle:
-                return processIdle();
+                log_ << time() << " idle" << endl;
+		return processIdle();
                 break;
             case State::Observing:
-                return processObserving();
+                log_ << time() << " observing" << endl;
+		return processObserving();
                 break;
             case State::ErrorRecovery:
                 return processErrorRecovery();
                 break;
 	    case State::ComputingApproachPoint:
+		log_ << time() << " computing approach" << endl;
 		return processApproachPointComputationPhase();
 		break;
             case State::Approaching:
+		log_ << time() << " approaching" << endl;
+
                 return processApproachPhase();
                 break;
             case State::VisualServoing:
                 return processVisualServoing();
                 break;
         }
+	log_ << time() <<  " update exit" << std::endl;
     }
     Eigen::Matrix<double, 7, 1> q_base;
 
@@ -249,6 +271,12 @@ private:
     int maxMissingFrames;
     int observationWindow;
     State state;
+
+    std::ofstream log_;
+    std::ofstream log_ik_;
+
+    std::chrono::high_resolution_clock::time_point start;
+    
     int missingFrames;
     vector<Eigen::Vector3d> positions;
     double time_stamp;
@@ -265,7 +293,7 @@ private:
     bool getPose(Eigen::Vector3d& pose) {
         pose = Eigen::Vector3d::Zero();
         return true;
-    }
+    } 
 
     void convert_to_global(CameraData& data) {
     	if (!data.global_frame) {
@@ -290,6 +318,7 @@ private:
     }
 
     array<double, 7> processIdle() {
+	std::lock_guard<std::mutex> lock(cameraDataMutex);
 	convert_to_global(cameraData);
         if (cameraData.detected) {
             cout << "Object detected, switching to Observing state.\n";
@@ -320,15 +349,17 @@ private:
 
     array<double, 7> processObserving() {
         Eigen::Vector3d pose;
+	std::lock_guard<std::mutex> lock(cameraDataMutex);
 	convert_to_global(cameraData);
         if (cameraData.detected) {
             missingFrames = 0;
             positions.push_back(cameraData.pose.translation());
-	    //cout << cameraData.pose.translation().transpose() << endl;
 	    if (positions.size() > observationWindow) {    
+                log_ << time() << " started fit " << time_stamp<< endl; 
 		pair<Eigen::Vector3d, Eigen::Vector3d> result = fitLine(positions, time_stamp - observationParams.start_time);
-                cout << "started obs: " << observationParams.start_time << " ended " << time_stamp<< endl; 
-		approachPointComputingParams = { time_stamp,  result.first, result.second };
+                log_ << time() << " started obs: " << observationParams.start_time << " ended " << time_stamp<< endl; 
+                //cout << "started obs: " << observationParams.start_time << " ended " << time_stamp<< endl; 
+		approachPointComputingParams = { time_stamp,  result.first, result.second, cameraData.pose.rotation() };
 		startApproachPointComputationPhase();
             }
         } else {
@@ -382,15 +413,19 @@ private:
     }
 
 
-    Eigen::VectorXd compute_ik(Eigen::VectorXd q_init, Eigen::Vector3d position, pinocchio::Model& model, pinocchio::Data& data) {
+    Eigen::VectorXd compute_ik(Eigen::VectorXd q_init, Eigen::Vector3d position, Eigen::Matrix3d orientation, pinocchio::Model& model, pinocchio::Data& data) {
         // TODO: handle different oreinetions
         Eigen::Matrix4d transformation = Eigen::Matrix4d::Identity();
-        transformation(0, 3) = position.x();
+        Eigen::Vector4d offset;
+	offset << orientation.col(2) * 0.1, 0;
+	transformation(0, 3) = position.x();
         transformation(1, 3) = position.y();
-        transformation(2, 3) = position.z() + 0.05; // depends on orient
-        transformation(1,1) = -1;
-        transformation(2,2) = -1;
-
+        transformation(2, 3) = position.z();
+        transformation.col(3) += offset;  	
+        transformation.col(0) << orientation.col(0), 0;
+	transformation.col(1) << -orientation.col(1), 0;
+        transformation.col(2) <<- orientation.col(2), 0;
+        
         double max_manupuability = 0;
         Eigen::VectorXd best_solution(7);
 
@@ -530,7 +565,7 @@ private:
 	Eigen::Vector3d obj_position_init= approachPointComputingParams.p_start;
         Eigen::Vector3d obj_velocity = approachPointComputingParams.velocity;
 	Eigen::VectorXd q_init = q_base;
-	    
+	Eigen::Matrix3d desired_orientation = approachPointComputingParams.orientation;
 	    
 	const Workspace ws = {{0.2, -0.4}, {0.6, 0.4}};
         double init_time = time_to_reach_workspace({obj_position_init.x(), obj_position_init.y()}, {obj_velocity.x(), obj_velocity.y()}, ws);
@@ -545,19 +580,19 @@ private:
         pinocchio::Model model;
         pinocchio::urdf::buildModel(urdf_filename, model);
         pinocchio::Data data(model);
-
+        
         while (in_bounds({obj_position.x(), obj_position.y()}, ws)) {
 
-            Eigen::VectorXd q_fin = compute_ik(q_init, obj_position, model, data);
+            Eigen::VectorXd q_fin = compute_ik(q_init, obj_position, desired_orientation, model, data);
             double execution_time = completion_time(q_init, q_fin);
-            //cout << obj_position.transpose() << "  " << execution_time << " " << cur_time << endl;
-	    if (execution_time + sample_duration < cur_time) {
-                cout << "approach data: " << obj_position.transpose() << "; time: " << execution_time + sample_duration << endl; 
-		return {q_fin, execution_time};
-            }
-	    auto end = std::chrono::high_resolution_clock::now();
+            auto end = std::chrono::high_resolution_clock::now();
             std::chrono::duration<double> duration = end - start;
 
+	    if (execution_time + sample_duration < cur_time) {
+                cout << endl << "approach data: " << obj_position.transpose() << "; time: " << execution_time + sample_duration << endl << "approach point comp time: " << duration.count()  << endl; 
+		return {q_fin, execution_time};
+            }
+	    //cerr << "delay " << duration.count() << endl;            
 	    iteration_num ++;
             cur_time = init_time + sample_duration * iteration_num + duration.count(); 
             obj_position = obj_position_init +  obj_velocity * cur_time;
@@ -570,33 +605,51 @@ private:
         auto [q_des, q_dot_des, q_ddot_des] = get_q(t, q_init, q_fin);
         return Kp * (q_des - q_cur) + Kd * (q_dot_des  - q_dot_cur) + M * q_ddot_des;
     }
+
+
+
+
+
     // Handle approach point calculation
     void compute_approach_point_mth()  {
-    	apResult.finished.store(false);
-	cout << "strated thread" << endl;
-    	pair<Eigen::VectorXd, double> res = compute_approach_point();
-    	cout << " computed approach point" << endl;
-	{
-	    std::lock_guard<std::mutex> lock(apResult.apResultMutex);
-	    apResult.q_config = res.first;
-            apResult.exe_time = res.second;
-	}
-    	apResult.finished.store(true);
+	    log_ik_ << time() <<  " compute_approach_point_mth entry" << std::endl;
+	    try { 
+		    apResult.finished.store(false);
+		    cout << "strated thread" << endl;
+		    pair<Eigen::VectorXd, double> res = compute_approach_point();
+		    cout << " computed approach point" << endl;
+		    {
+			    std::lock_guard<std::mutex> lock(apResult.apResultMutex);
+			    apResult.q_config = res.first;
+			    apResult.exe_time = res.second;
+		    }
+		    apResult.finished.store(true);
+	    } catch (std::exception const & ex ) {
+		    std::cerr << "compute_approach_point_mth catch ex: " << ex.what() <<std::endl;
+		    log_ik_ << time() << "compute_approach_point_mth catch ex: " << ex.what() <<std::endl;
+
+	    }
+	    log_ik_ << time() <<  " compute_approach_point_mth exit" << std::endl;
     }
-    
+
+    std::thread new_thread_; 
     void startApproachPointComputationPhase() {
-        cout << "Started computing approach point" << endl;   
+        log_ << time() << "Started computing approach point" << endl;   
         apResult.finished.store(false);
-	std::thread newThread(&StateController::compute_approach_point_mth, this);
-	newThread.detach();
+	new_thread_ = std::thread(&StateController::compute_approach_point_mth, this);
         state = State::ComputingApproachPoint;
+        log_ << time() << "Finished computing approach point" << endl;   
     }
 
     array<double, 7> processApproachPointComputationPhase() {
-	if (apResult.finished.load()) { 
+	log_ << time() <<  " waiting for compututions to finish " << std::endl;
+
+	if (apResult.finished.load()) {
+	    log_ << time() <<  "changing state to approaching; before" << std::endl;   	
             std::lock_guard<std::mutex> lock(apResult.apResultMutex);		
-            startApproachPhase(apResult.q_config, apResult.exe_time);	    
-	} //else cout << "waiting for commputations to finish " << endl; 
+            startApproachPhase(apResult.q_config, apResult.exe_time);
+            log_ << time() <<  "changing state to approaching; after" << std::endl;	    
+	} else log_ << time() <<  " else" << endl; 
         return maintain_base_pos();
     }
 
@@ -636,6 +689,7 @@ private:
 	    cout << "cur time: " <<  time_stamp << " " << approachParams.start_time + approachParams.exe_time << endl;   
 	    Eigen::Matrix4d T_ee_o(Eigen::Matrix4d::Map(robot_state.O_T_EE.data()));
 	    cout <<"ee pose: " << T_ee_o(0,3) << " " << T_ee_o(1,3) << " " << T_ee_o(2,3) << endl;
+	    std::lock_guard<std::mutex> lock(cameraDataMutex);
 	    convert_to_global(cameraData);
 	    cout << cameraData.pose.translation() << endl;
 	    throw runtime_error("approached");
@@ -772,11 +826,8 @@ private:
 
 int main(int argc, char ** argv) {
     using namespace pinocchio;
-    //camera set up
-//    cv::Mat markerImage;
-    //cv::drawMarker(dictionary, 0, 200, markerImage, 1);
-   // cv::imwrite("marker.png", markerImage);
     
+
     rs2::pipeline pipe;
     rs2::config cfg;
     const int fps = 6;

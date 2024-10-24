@@ -71,6 +71,9 @@ if [ ! -d librealsense/build ]; then
 	cd
 fi
 
+sudo apt-get install libopenexr-dev
+
+
 SCRIPT_DIR=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
 echo  ${SCRIPT_DIR}
 cp ${SCRIPT_DIR}/visual_servoing/franka_ik_He.hpp $HOME/lib/include
