@@ -259,6 +259,8 @@ public:
                 return processApproachPhase();
                 break;
             case State::VisualServoing:
+		log_ << time() << " VS" << endl;
+
                 return processVisualServoing();
                 break;
         }
@@ -276,7 +278,7 @@ private:
     std::ofstream log_ik_;
 
     std::chrono::high_resolution_clock::time_point start;
-    
+    double OFFSET_LENGTH = 0.2;
     int missingFrames;
     vector<Eigen::Vector3d> positions;
     double time_stamp;
@@ -417,7 +419,7 @@ private:
         // TODO: handle different oreinetions
         Eigen::Matrix4d transformation = Eigen::Matrix4d::Identity();
         Eigen::Vector4d offset;
-	offset << orientation.col(2) * 0.1, 0;
+	offset << orientation.col(2) * OFFSET_LENGTH, 0;
 	transformation(0, 3) = position.x();
         transformation(1, 3) = position.y();
         transformation(2, 3) = position.z();
@@ -426,7 +428,7 @@ private:
 	transformation.col(1) << -orientation.col(1), 0;
         transformation.col(2) <<- orientation.col(2), 0;
         
-        double max_manupuability = 0;
+        double min_dist = 1000000000;
         Eigen::VectorXd best_solution(7);
 
         array<double, 16> flat_array;
@@ -452,15 +454,15 @@ private:
                 Eigen::EigenSolver<Eigen::MatrixXd> solver(jacobian.topLeftCorner(3, 7) * jacobian.topLeftCorner(3,7).transpose());
                 Eigen::VectorXd eigenvalues = solver.eigenvalues().real();
 
-                double manupuability = eigenvalues.minCoeff() / eigenvalues.maxCoeff();
-                if (manupuability > max_manupuability) {
+                double dist = (q - q_init).norm();
+                if (dist  < min_dist) {
                     best_solution = q;
-                    max_manupuability = manupuability;
+                    min_dist= dist;
                 }
             }
         }
         //std::cout << "max man " << max_manupuability << std::endl;
-        if (max_manupuability > 0) return best_solution;
+        if (min_dist < 1000000000) return best_solution;
         throw runtime_error("Couldnt #2ik reach the object.");
     }
 
@@ -567,8 +569,9 @@ private:
 	Eigen::VectorXd q_init = q_base;
 	Eigen::Matrix3d desired_orientation = approachPointComputingParams.orientation;
 	    
-	const Workspace ws = {{0.2, -0.4}, {0.6, 0.4}};
-        double init_time = time_to_reach_workspace({obj_position_init.x(), obj_position_init.y()}, {obj_velocity.x(), obj_velocity.y()}, ws);
+	//const Workspace ws = {{0.2, -0.4}, {0.6, 0.4}};
+        const Workspace ws = {{-0.5,-0.6 }, {0.5, -0.2}};
+	double init_time = time_to_reach_workspace({obj_position_init.x(), obj_position_init.y()}, {obj_velocity.x(), obj_velocity.y()}, ws);
         double cur_time = init_time;
 	if (cur_time == -1) throw runtime_error("The object is out of the workspace.");
 	Eigen::Vector3d obj_position = obj_position_init +  obj_velocity * init_time;
@@ -689,32 +692,30 @@ private:
 	    cout << "cur time: " <<  time_stamp << " " << approachParams.start_time + approachParams.exe_time << endl;   
 	    Eigen::Matrix4d T_ee_o(Eigen::Matrix4d::Map(robot_state.O_T_EE.data()));
 	    cout <<"ee pose: " << T_ee_o(0,3) << " " << T_ee_o(1,3) << " " << T_ee_o(2,3) << endl;
-	    std::lock_guard<std::mutex> lock(cameraDataMutex);
-	    convert_to_global(cameraData);
-	    cout << cameraData.pose.translation() << endl;
-	    throw runtime_error("approached");
-            startVisualServoing();
+	    //throw runtime_error("approached");
+            return startVisualServoing();
         }
     }
 
     //Handle visual servoing state
 
-    Eigen::VectorXd visual_servoing_controller(Eigen::VectorXd q, Eigen::VectorXd q_dot, Eigen::Vector3d obj_position, Eigen::Vector3d obj_velocity, Eigen::Matrix<double, 6, 7>jacobian, Eigen::Matrix4d T_ee_0) {
+    Eigen::VectorXd visual_servoing_controller(Eigen::VectorXd q, Eigen::VectorXd q_dot, Eigen::Isometry3d pose, Eigen::Vector3d obj_velocity, Eigen::Matrix<double, 6, 7>jacobian, Eigen::Matrix4d T_ee_0) {
         Eigen::MatrixXd w = Eigen::MatrixXd::Identity(7, 7);
         Eigen::DiagonalMatrix<double, 6> Kp_ts(300, 300, 300, 30, 30, 30);
         Eigen::DiagonalMatrix<double, 7> Kd(20, 20, 20, 20, 20, 20, 8);
-
-        Eigen::VectorXd obj_pos_ext(4);
-        obj_pos_ext.head(3) = obj_position;
-        obj_pos_ext(3) = 1;
-
-        obj_position = obj_pos_ext.head(3);
+        
+        Eigen::Vector3d offset;
+        offset << pose.rotation().col(2) * OFFSET_LENGTH;
+        Eigen::Vector3d obj_position = pose.translation() + offset;
         Eigen::Vector3d error_pos = obj_position - T_ee_0.topRightCorner<3,1>();
 
         Eigen::Matrix3d r_desired = Eigen::Matrix3d::Identity();
-        r_desired(1,1) = -1;
-        r_desired(2,2) = -1;
-        Eigen::Matrix3d r_diff = r_desired * T_ee_0.topLeftCorner<3,3>().transpose();
+        r_desired.col(0) << pose.rotation().col(0);
+        r_desired.col(1) << - pose.rotation().col(1);
+        r_desired.col(2) << - pose.rotation().col(2);
+
+	
+	Eigen::Matrix3d r_diff = r_desired * T_ee_0.topLeftCorner<3,3>().transpose();
 
         Eigen::AngleAxisd angle_axis(r_diff);
         Eigen::Vector3d error_orient = angle_axis.axis() * angle_axis.angle();
@@ -722,6 +723,7 @@ private:
         Eigen::VectorXd error_p(6);
         error_p.head(3) = error_pos;
         error_p.tail(3) = error_orient;
+                log_ << time() << " V psoe error " << error_p.transpose() << endl;
 
         Eigen::VectorXd q_dot_des_ts = Eigen::VectorXd::Zero(6);
         q_dot_des_ts.head(3) = obj_velocity;
@@ -735,14 +737,22 @@ private:
 
 
 
-    void startVisualServoing() {
+    array<double, 7> startVisualServoing() {
         state = State::VisualServoing;
-        visualServoingParams = {time_stamp,  ZERO_TORQUES};
-    }
+        log_ << time() << " starting VS " << endl;
+        Eigen::Map<const Eigen::Matrix<double, 7, 1>> q(robot_state.q.data());
+        q_base = q;
+
+	visualServoingParams = {time_stamp, maintain_base_pos()};
+       	return maintain_base_pos(); 
+    } 
 
     array<double, 7> processVisualServoing() {
         Eigen::Vector3d pose;
-        if (getPose(pose)) {
+        std::lock_guard<std::mutex> lock(cameraDataMutex);
+        convert_to_global(cameraData);
+          
+	if (cameraData.detected) {
             missingFrames = 0;
             array<double, 7> coriolis_array = model.coriolis(robot_state);
             array<double, 49> mass_array = model.mass(robot_state);
@@ -754,22 +764,28 @@ private:
             Eigen::Map<const Eigen::Matrix<double, 7, 1>> q(robot_state.q.data());
             Eigen::Map<const Eigen::Matrix<double, 7, 1>> dq(robot_state.dq.data());
             Eigen::Matrix4d T_ee_0(Eigen::Matrix4d::Map(robot_state.O_T_EE.data()));
-
+            //
+	    q_base = q;
+	    //
             Eigen::VectorXd tau_cmd = Eigen::VectorXd::Zero(7);
             //
 
             Eigen::Vector3d velocity = Eigen::Vector3d::Zero();
             //
-            tau_cmd = visual_servoing_controller(q, dq, pose, velocity, jacobian, T_ee_0); // get velocity somewhere ?
-            tau_cmd += coriolis;
+            tau_cmd = visual_servoing_controller(q, dq, cameraData.pose, velocity, jacobian, T_ee_0); // get velocity somewhere ?
+            log_ << time() << " VS torque: " << tau_cmd.transpose() << endl;
+	    tau_cmd += coriolis;
+
             std::array<double, 7> tau_d_array{};
-            Eigen::VectorXd::Map(&tau_d_array[0], 7) = tau_cmd;
+	    Eigen::VectorXd::Map(&tau_d_array[0], 7) = tau_cmd;
             visualServoingParams.tau_prev = tau_d_array;
-            return tau_d_array;
+            //throw runtime_error("stopped vs");
+
+	    return tau_d_array;
 
         } else {
-            handleMissingFrame();
-            return visualServoingParams.tau_prev;
+            //handleMissingFrame();
+            return maintain_base_pos();//visualServoingParams.tau_prev;
         }
 
     }
@@ -857,7 +873,7 @@ int main(int argc, char ** argv) {
     franka::RobotState initial_state = robot.readOnce();
     string mode = argv[2];
 
-    StateController controller(model, 30, 2500);
+    StateController controller(model, 400, 2500);
     Eigen::Map<const Eigen::Matrix<double, 7, 1>> q_init(initial_state.q.data());
     controller.q_base = q_init;
     auto control_callback = [&](const franka::RobotState& robot_state,
