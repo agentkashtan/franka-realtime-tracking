@@ -12,7 +12,7 @@ cd
 #mkdir build
 #cd build
 #cmake .. -DCMAKE_INSTALL_PREFIX=$HOME/lib
-#make -j11
+uw_panda_robohub#make -j11
 #make install
 #cd 
 #

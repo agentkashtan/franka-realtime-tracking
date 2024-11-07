@@ -22,7 +22,7 @@
 #include <chrono>
 #include <mutex>
 
-
+#include "kalman.h"
 
 #include <franka/duration.h>
 #include <franka/exception.h>
@@ -80,10 +80,11 @@ struct CameraData {
 	bool detected;
 	Eigen::Isometry3d pose;
         bool global_frame;
+	bool new_data;
 };
 
 std::mutex cameraDataMutex;
-CameraData cameraData = { false, Eigen::Isometry3d::Identity(), false };
+CameraData cameraData = { false, Eigen::Isometry3d::Identity(), false, false };
 
 struct APResult {
 	std::atomic<bool> finished{false};
@@ -94,79 +95,6 @@ struct APResult {
 
 APResult apResult;
 
-void realsense_callback(const rs2::frame& frame) {
-
-    Eigen::Isometry3d g_T_c;
-    g_T_c.setIdentity();
-    g_T_c.linear() = Eigen::AngleAxisd(-1.57, Eigen::Vector3d::UnitZ()).toRotationMatrix();
-    g_T_c.translation() << -0.03, 0., -0.06;
-	
-    rs2::frameset fs = frame.as<rs2::frameset>();
-    if(!fs)return;
-    rs2::video_frame cur_frame = fs.get_color_frame();
-    if(!cur_frame)return;
-
-    // Convert the RealSense frame to a cv::Mat
-    rs2::video_frame video_frame = cur_frame.as<rs2::video_frame>();
-    int width = video_frame.get_width();
-    int height = video_frame.get_height();
-    int channels = video_frame.get_bytes_per_pixel();
-    int stride = video_frame.get_stride_in_bytes();
-
-    // The image data is stored in a shared pointer
-    const void* frame_data = video_frame.get_data();
-    try {
-	   cv::aruco::DetectorParameters d_params = cv::aruco::DetectorParameters();
-	    
-	    cv::Mat image(height, width, CV_8UC(channels), const_cast<void*>(frame_data), stride);
-	    vector<int> ids;
-	    vector<vector<cv::Point2f>> corners, rejected;     
-
- 	    cv::aruco::ArucoDetector detector(dictionary, d_params);
-	    detector.detectMarkers(image, corners, ids, rejected);
-	    
-	    cv::Mat objPoints(4, 1, CV_32FC3);
-	    objPoints.ptr<cv::Vec3f>(0)[0] = cv::Vec3f(-markerLength/2.f, markerLength/2.f, 0);
-	    objPoints.ptr<cv::Vec3f>(0)[1] = cv::Vec3f(markerLength/2.f, markerLength/2.f, 0);
-	    objPoints.ptr<cv::Vec3f>(0)[2] = cv::Vec3f(markerLength/2.f, -markerLength/2.f, 0);
-	    objPoints.ptr<cv::Vec3f>(0)[3] = cv::Vec3f(-markerLength/2.f, -markerLength/2.f, 0);
-            Eigen::Isometry3d camera_T_tag;
-
-	    if (ids.size() == 1 && ids.front() == 0) {
-		cv::Vec3d rvec, tvec;
-		vector<int> dist;
-		cv::solvePnP(objPoints, corners.at(0), cameraMatrix, dist, rvec, tvec);
-
-		cv::drawFrameAxes(image, cameraMatrix, dist, rvec, tvec, 0.1);	
-		
-		// construct 4x4 transformation matrix
-
-		// rotation
-		cv::Mat rot_mat(3, 3, CV_32FC1); ;
-		cv::Rodrigues(rvec, rot_mat);
-		Eigen::Matrix3d eigen_matrix;
-		cv::cv2eigen(rot_mat, eigen_matrix);
-		camera_T_tag.linear() = eigen_matrix;
-		Eigen::Vector3d eigen_translation;
-		cv::cv2eigen(tvec,eigen_translation);
-		camera_T_tag.translation() = eigen_translation;
-	    	
-		std::lock_guard<std::mutex> lock(cameraDataMutex);
-		frame_number = 0;
-		cameraData = { true, g_T_c * camera_T_tag, false };
-	    } else {
-		std::lock_guard<std::mutex> lock(cameraDataMutex);
-	    	frame_number ++;
-		cameraData = { false, g_T_c * camera_T_tag, false };
-	    }
-
-	    cv::cvtColor(image, image, cv::COLOR_RGB2BGR);
-	    cv::imshow("tasde", image);
-	    cv::waitKey(5);
-    } catch (std::exception const & ex ) {
-    	std::cout << ex.what() << std::endl;
-    }
-};	
 
 
 enum class State {
@@ -185,6 +113,7 @@ struct IdleParams {
 
 struct ObservationParams {
     double start_time;
+    MovementEstimator* estimator;
 };
 
 struct ApproachPointComputingParams {
@@ -208,6 +137,84 @@ struct VisualServoingParams {
 array<double, 7> ZERO_TORQUES = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
 
 
+    void realsense_callback(const rs2::frame& frame) {
+
+            Eigen::Isometry3d g_T_c;
+            g_T_c.setIdentity();
+            g_T_c.linear() = Eigen::AngleAxisd(-1.57, Eigen::Vector3d::UnitZ()).toRotationMatrix();
+            g_T_c.translation() << -0.03, 0., -0.06;
+
+            rs2::frameset fs = frame.as<rs2::frameset>();
+            if(!fs)return;
+            rs2::video_frame cur_frame = fs.get_color_frame();
+            if(!cur_frame)return;
+
+            // Convert the RealSense frame to a cv::Mat
+            rs2::video_frame video_frame = cur_frame.as<rs2::video_frame>();
+            int width = video_frame.get_width();
+            int height = video_frame.get_height();
+            int channels = video_frame.get_bytes_per_pixel();
+            int stride = video_frame.get_stride_in_bytes();
+
+            // The image data is stored in a shared pointer
+            const void* frame_data = video_frame.get_data();
+            try {
+                   cv::aruco::DetectorParameters d_params = cv::aruco::DetectorParameters();
+
+                    cv::Mat image(height, width, CV_8UC(channels), const_cast<void*>(frame_data), stride);
+                    vector<int> ids;
+                    vector<vector<cv::Point2f>> corners, rejected;
+
+                    cv::aruco::ArucoDetector detector(dictionary, d_params);
+                    detector.detectMarkers(image, corners, ids, rejected);
+
+                    cv::Mat objPoints(4, 1, CV_32FC3);
+                    objPoints.ptr<cv::Vec3f>(0)[0] = cv::Vec3f(-markerLength/2.f, markerLength/2.f, 0);
+                    objPoints.ptr<cv::Vec3f>(0)[1] = cv::Vec3f(markerLength/2.f, markerLength/2.f, 0);
+                    objPoints.ptr<cv::Vec3f>(0)[2] = cv::Vec3f(markerLength/2.f, -markerLength/2.f, 0);
+                    objPoints.ptr<cv::Vec3f>(0)[3] = cv::Vec3f(-markerLength/2.f, -markerLength/2.f, 0);
+                    Eigen::Isometry3d camera_T_tag;
+
+                    if (ids.size() == 1 && ids.front() == 0) {
+                        cv::Vec3d rvec, tvec;
+                        vector<int> dist;
+                        cv::solvePnP(objPoints, corners.at(0), cameraMatrix, dist, rvec, tvec);
+
+                        cv::drawFrameAxes(image, cameraMatrix, dist, rvec, tvec, 0.1);
+
+                        // construct 4x4 transformation matrix
+
+                        // rotation
+                        cv::Mat rot_mat(3, 3, CV_32FC1); ;
+                        cv::Rodrigues(rvec, rot_mat);
+                        Eigen::Matrix3d eigen_matrix;
+                        cv::cv2eigen(rot_mat, eigen_matrix);
+                        camera_T_tag.linear() = eigen_matrix;
+                        Eigen::Vector3d eigen_translation;
+                        cv::cv2eigen(tvec,eigen_translation);
+                        camera_T_tag.translation() = eigen_translation;
+
+                        std::lock_guard<std::mutex> lock(cameraDataMutex);
+                        frame_number = 0;
+                        cameraData = { true, g_T_c * camera_T_tag, false, true };
+                    } else {
+                        std::lock_guard<std::mutex> lock(cameraDataMutex);
+                        frame_number ++;
+                        cameraData = { false, g_T_c * camera_T_tag, false, true };
+                    }
+
+                    cv::cvtColor(image, image, cv::COLOR_RGB2BGR);
+                    cv::imshow("tasde", image);
+                    cv::waitKey(5);
+            } catch (std::exception const & ex ) {
+                std::cout << ex.what() << std::endl;
+            }
+        };
+
+
+
+
+
 class StateController {
 public:
     StateController(franka::Model& model, int maxMissingFrames, int observationWindow)
@@ -220,6 +227,10 @@ public:
             //q_base <<  1.4784838,   0.58908088, -1.51156758, -2.32406426,  0.75959274,  2.20523463, -2.89;
             log_ik_ = std::ofstream("/dev/shm/ik.log");
 	    log_ = std::ofstream("/dev/shm/controller.log");
+            
+	    log_rp_ = std::ofstream("/dev/shm/real_pose.log");
+            log_pp_ = std::ofstream("/dev/shm/predicted_pose.log");
+            log_vel_ = std::ofstream("/dev/shm/velocity.log");
 
 	    start = std::chrono::high_resolution_clock::now();
 	    Kp.diagonal() << 200, 200, 200, 200, 200, 200,200;
@@ -268,7 +279,6 @@ public:
     }
     Eigen::Matrix<double, 7, 1> q_base;
 
-
 private:
     int maxMissingFrames;
     int observationWindow;
@@ -276,6 +286,10 @@ private:
 
     std::ofstream log_;
     std::ofstream log_ik_;
+    std::ofstream log_rp_;
+    std::ofstream log_pp_;
+    std::ofstream log_vel_;
+ 
 
     std::chrono::high_resolution_clock::time_point start;
     double OFFSET_LENGTH = 0.2;
@@ -344,6 +358,10 @@ private:
     void startObserving(const Eigen::Vector3d& initialPosition) {
         state = State::Observing;
         observationParams.start_time = time_stamp;
+	Eigen::MatrixXd temp_p = Eigen::MatrixXd::Identity(6, 6) * 2;
+	temp_p.topLeftCorner(3, 3) = Eigen::MatrixXd::Identity(3, 3) * 2;
+	observationParams.estimator = new MovementEstimator(initialPosition, time_stamp, temp_p);
+        cameraData.newData = false;	
         positions.clear();
         positions.push_back(initialPosition);
         missingFrames = 0;
@@ -355,15 +373,28 @@ private:
 	convert_to_global(cameraData);
         if (cameraData.detected) {
             missingFrames = 0;
-            positions.push_back(cameraData.pose.translation());
-	    if (positions.size() > observationWindow) {    
-                log_ << time() << " started fit " << time_stamp<< endl; 
-		pair<Eigen::Vector3d, Eigen::Vector3d> result = fitLine(positions, time_stamp - observationParams.start_time);
-                log_ << time() << " started obs: " << observationParams.start_time << " ended " << time_stamp<< endl; 
-                //cout << "started obs: " << observationParams.start_time << " ended " << time_stamp<< endl; 
-		approachPointComputingParams = { time_stamp,  result.first, result.second, cameraData.pose.rotation() };
-		startApproachPointComputationPhase();
-            }
+            //positions.push_back(cameraData.pose.translation());
+	    observationParams.estimator->predict(time_stamp);
+	    if (cameraData.newData) {
+	    	bservationParams.estimator->correct(cameraData.pose.translation());
+	    }
+            /*
+	    if (cameraData.newData) {
+	    	observationParams.estimator->predict(time_stamp);
+	   	auto res = observationParams.estimator->get_state();
+	   	log_rp_ << cameraData.pose.translation().transpose() << endl;
+	   	log_pp_ << res.first.transpose() << endl;
+	    	log_vel_ << res.second.transpose() << endl;
+
+	    	if (positions.size() > observationWindow) {    
+                	log_ << time() << " started fit " << time_stamp<< endl; 
+			pair<Eigen::Vector3d, Eigen::Vector3d> result = fitLine(positions, time_stamp - observationParams.start_time);
+                	log_ << time() << " started obs: " << observationParams.start_time << " ended " << time_stamp<< endl;  
+			approachPointComputingParams = { time_stamp,  result.first, result.second, cameraData.pose.rotation() };
+			startApproachPointComputationPhase();
+            	}
+	    }
+	  */
         } else {
             handleMissingFrame();
         }
@@ -844,18 +875,6 @@ int main(int argc, char ** argv) {
     using namespace pinocchio;
     
 
-    rs2::pipeline pipe;
-    rs2::config cfg;
-    const int fps = 6;
-    cfg.enable_stream(RS2_STREAM_COLOR, 1920, 1080, RS2_FORMAT_RGB8, fps);
-    cfg.enable_stream(RS2_STREAM_DEPTH, 848, 480, RS2_FORMAT_Z16, fps);
-    cfg.enable_device("944122072327");
-    pipe.start(cfg,realsense_callback);
-    auto intrinsics = pipe.get_active_profile().get_stream(rs2_stream::RS2_STREAM_COLOR).as<rs2::video_stream_profile>().get_intrinsics();
-
-   //TODO: convert instrinsics to OpenCV
-    float camera_data[3][3] = {{intrinsics.fx, 0, intrinsics.width / 2.f}, {0, intrinsics.fy, intrinsics.height / 2.f}, {0, 0, 1}};
-    cameraMatrix = cv::Mat(3, 3, CV_32FC1, &camera_data);
 
 
     // Robot set up
@@ -874,7 +893,21 @@ int main(int argc, char ** argv) {
     string mode = argv[2];
 
     StateController controller(model, 400, 2500);
+    
+    rs2::pipeline pipe;
+    rs2::config cfg;
+    const int fps = 6;
+    cfg.enable_stream(RS2_STREAM_COLOR, 1920, 1080, RS2_FORMAT_RGB8, fps);
+    cfg.enable_stream(RS2_STREAM_DEPTH, 848, 480, RS2_FORMAT_Z16, fps);
+    cfg.enable_device("944122072327");
+    pipe.start(cfg, realsense_callback());
+    auto intrinsics = pipe.get_active_profile().get_stream(rs2_stream::RS2_STREAM_COLOR).as<rs2::video_stream_profile>().get_intrinsics();
+
+   //TODO: convert instrinsics to OpenCV
+    float camera_data[3][3] = {{intrinsics.fx, 0, intrinsics.width / 2.f}, {0, intrinsics.fy, intrinsics.height / 2.f}, {0, 0, 1}};
+    cameraMatrix = cv::Mat(3, 3, CV_32FC1, &camera_data);
     Eigen::Map<const Eigen::Matrix<double, 7, 1>> q_init(initial_state.q.data());
+    
     controller.q_base = q_init;
     auto control_callback = [&](const franka::RobotState& robot_state,
                                       franka::Duration period) -> franka::Torques {
