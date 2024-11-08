@@ -11,7 +11,7 @@ public:
     MovementEstimator(Eigen::VectorXd init_position, double init_time, Eigen::MatrixXd init_P);
 
     // Predict function declaration
-    std::pair<Eigen::Vector3d, Eigen::Vector3d> get_state();
+    std::pair<Eigen::VectorXd, double> get_state();
     void predict(double t);
     void correct(Eigen::Vector3d measurement);
 

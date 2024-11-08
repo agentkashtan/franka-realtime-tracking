@@ -292,7 +292,7 @@ private:
  
 
     std::chrono::high_resolution_clock::time_point start;
-    double OFFSET_LENGTH = 0.2;
+    double OFFSET_LENGTH = 0.1;
     int missingFrames;
     vector<Eigen::Vector3d> positions;
     double time_stamp;
@@ -361,7 +361,7 @@ private:
 	Eigen::MatrixXd temp_p = Eigen::MatrixXd::Identity(6, 6) * 2;
 	temp_p.topLeftCorner(3, 3) = Eigen::MatrixXd::Identity(3, 3) * 2;
 	observationParams.estimator = new MovementEstimator(initialPosition, time_stamp, temp_p);
-        cameraData.newData = false;	
+        cameraData.new_data = false;	
         positions.clear();
         positions.push_back(initialPosition);
         missingFrames = 0;
@@ -373,11 +373,25 @@ private:
 	convert_to_global(cameraData);
         if (cameraData.detected) {
             missingFrames = 0;
-            //positions.push_back(cameraData.pose.translation());
 	    observationParams.estimator->predict(time_stamp);
-	    if (cameraData.newData) {
-	    	bservationParams.estimator->correct(cameraData.pose.translation());
+	    if (cameraData.new_data) {
+	    	observationParams.estimator->correct(cameraData.pose.translation());
+	 	cameraData.new_data = false;
+	        positions.push_back(cameraData.pose.translation());
+		//cout << positions.size() << endl;
+		if (positions.size() > observationWindow) {
+			auto res = observationParams.estimator->get_state();
+			approachPointComputingParams = { time_stamp, res.first.head(3), res.first.tail(3), cameraData.pose.rotation() };
+                        cout << "velocity: " << res.first.tail(3).transpose() << endl;
+			startApproachPointComputationPhase();
+		}
 	    }
+
+            auto res = observationParams.estimator->get_state();
+	    log_rp_ << cameraData.pose.translation().transpose() << endl;
+            log_pp_ << res.first.head(3).transpose() << " " << res.second << endl;
+            log_vel_ << res.first.tail(3).transpose() << endl;
+
             /*
 	    if (cameraData.newData) {
 	    	observationParams.estimator->predict(time_stamp);
@@ -601,7 +615,7 @@ private:
 	Eigen::Matrix3d desired_orientation = approachPointComputingParams.orientation;
 	    
 	//const Workspace ws = {{0.2, -0.4}, {0.6, 0.4}};
-        const Workspace ws = {{-0.5,-0.6 }, {0.5, -0.2}};
+        const Workspace ws = {{-0.5,-0.6 }, {0.4, -0.2}};
 	double init_time = time_to_reach_workspace({obj_position_init.x(), obj_position_init.y()}, {obj_velocity.x(), obj_velocity.y()}, ws);
         double cur_time = init_time;
 	if (cur_time == -1) throw runtime_error("The object is out of the workspace.");
@@ -639,9 +653,6 @@ private:
         auto [q_des, q_dot_des, q_ddot_des] = get_q(t, q_init, q_fin);
         return Kp * (q_des - q_cur) + Kd * (q_dot_des  - q_dot_cur) + M * q_ddot_des;
     }
-
-
-
 
 
     // Handle approach point calculation
@@ -692,9 +703,6 @@ private:
     
     // Handle approaching state
     void startApproachPhase(Eigen::VectorXd approach_config, double exe_time) {
-        cout << approach_config.transpose() << endl;
-	cout << exe_time << endl;
-	//throw runtime_error("computed approach point");
 	state = State::Approaching;
         approachParams = {time_stamp, approach_config, exe_time};
     }
@@ -723,7 +731,7 @@ private:
 	    cout << "cur time: " <<  time_stamp << " " << approachParams.start_time + approachParams.exe_time << endl;   
 	    Eigen::Matrix4d T_ee_o(Eigen::Matrix4d::Map(robot_state.O_T_EE.data()));
 	    cout <<"ee pose: " << T_ee_o(0,3) << " " << T_ee_o(1,3) << " " << T_ee_o(2,3) << endl;
-	    //throw runtime_error("approached");
+	    throw runtime_error("approached");
             return startVisualServoing();
         }
     }
@@ -892,7 +900,7 @@ int main(int argc, char ** argv) {
     franka::RobotState initial_state = robot.readOnce();
     string mode = argv[2];
 
-    StateController controller(model, 400, 2500);
+    StateController controller(model, 600, 25);
     
     rs2::pipeline pipe;
     rs2::config cfg;
@@ -900,7 +908,7 @@ int main(int argc, char ** argv) {
     cfg.enable_stream(RS2_STREAM_COLOR, 1920, 1080, RS2_FORMAT_RGB8, fps);
     cfg.enable_stream(RS2_STREAM_DEPTH, 848, 480, RS2_FORMAT_Z16, fps);
     cfg.enable_device("944122072327");
-    pipe.start(cfg, realsense_callback());
+    pipe.start(cfg, realsense_callback);
     auto intrinsics = pipe.get_active_profile().get_stream(rs2_stream::RS2_STREAM_COLOR).as<rs2::video_stream_profile>().get_intrinsics();
 
    //TODO: convert instrinsics to OpenCV
