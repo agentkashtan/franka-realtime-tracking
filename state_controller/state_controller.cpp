@@ -231,7 +231,8 @@ public:
 	    log_rp_ = std::ofstream("/dev/shm/real_pose.log");
             log_pp_ = std::ofstream("/dev/shm/predicted_pose.log");
             log_vel_ = std::ofstream("/dev/shm/velocity.log");
-
+            log_ad_ = std::ofstream("/dev/shm/a_data.log");
+	    
 	    start = std::chrono::high_resolution_clock::now();
 	    Kp.diagonal() << 200, 200, 200, 200, 200, 200,200;
             Kd.diagonal() << 20, 20, 20, 20, 20, 20, 8;
@@ -243,29 +244,38 @@ public:
         return std::to_string(duration.count());
     }
 
+    double d_time(){
+        auto end = std::chrono::high_resolution_clock::now();
+        std::chrono::duration<double> duration = end - start;
+        return duration.count();
+    }
+
+
 
     array<double, 7> update(double time1, franka::RobotState robotState) {
-	log_ << time() <<  " update entry" << std::endl;
+	//log_ << time() <<  " update entry" << std::endl;
         time_stamp = time1;
         robot_state = robotState;
+        Eigen::Map<const Eigen::Matrix<double, 7, 1>> q(robot_state.q.data());
+         log_ad_ << time() << " " << q.transpose() << endl;
         switch (state) {
             case State::Idle:
-                log_ << time() << " idle" << endl;
+                //log_ << time() << " idle" << endl;
 		return processIdle();
                 break;
             case State::Observing:
-                log_ << time() << " observing" << endl;
+               // log_ << time() << " observing" << endl;
 		return processObserving();
                 break;
             case State::ErrorRecovery:
                 return processErrorRecovery();
                 break;
 	    case State::ComputingApproachPoint:
-		log_ << time() << " computing approach" << endl;
+		//log_ << time() << " computing approach" << endl;
 		return processApproachPointComputationPhase();
 		break;
             case State::Approaching:
-		log_ << time() << " approaching" << endl;
+	//	log_ << time() << " approaching" << endl;
 
                 return processApproachPhase();
                 break;
@@ -289,10 +299,11 @@ private:
     std::ofstream log_rp_;
     std::ofstream log_pp_;
     std::ofstream log_vel_;
- 
+    std::ofstream log_ad_;
+
 
     std::chrono::high_resolution_clock::time_point start;
-    double OFFSET_LENGTH = 0.1;
+    double OFFSET_LENGTH = 0.15;
     int missingFrames;
     vector<Eigen::Vector3d> positions;
     double time_stamp;
@@ -607,7 +618,8 @@ private:
 
     pair<Eigen::VectorXd, double> compute_approach_point() {
         auto start = std::chrono::high_resolution_clock::now();
-
+	
+   
 	    
 	Eigen::Vector3d obj_position_init= approachPointComputingParams.p_start;
         Eigen::Vector3d obj_velocity = approachPointComputingParams.velocity;
@@ -623,7 +635,6 @@ private:
         double sample_duration = 0.01;
         int iteration_num = 0;
 
-
         const string urdf_filename = "../urdf/panda.urdf";
         pinocchio::Model model;
         pinocchio::urdf::buildModel(urdf_filename, model);
@@ -635,22 +646,24 @@ private:
             double execution_time = completion_time(q_init, q_fin);
             auto end = std::chrono::high_resolution_clock::now();
             std::chrono::duration<double> duration = end - start;
-
+	    cur_time += duration.count(); 
 	    if (execution_time + sample_duration < cur_time) {
-                cout << endl << "approach data: " << obj_position.transpose() << "; time: " << execution_time + sample_duration << endl << "approach point comp time: " << duration.count()  << endl; 
+                cout << endl << "approach data: " << obj_position.transpose() << "; time: " << execution_time + sample_duration << endl << "approach point comp time: " << duration.count() << "iter num: "  << iteration_num << endl; 
+		cout << "extra time " << duration.count() << endl;
+		
 		return {q_fin, execution_time};
             }
 	    //cerr << "delay " << duration.count() << endl;            
 	    iteration_num ++;
-            cur_time = init_time + sample_duration * iteration_num + duration.count(); 
+            cur_time = init_time + sample_duration * iteration_num; 
             obj_position = obj_position_init +  obj_velocity * cur_time;
-	    //cout << obj_position.transpose() << "  " << execution_time << " " << cur_time <<" ;running time: " << duration.count() << endl;
-        }
+	}
         throw runtime_error("Could not reach the object.");
     }
 
     Eigen::VectorXd first_phase_controller(double t, Eigen::VectorXd q_init, Eigen::VectorXd q_fin, Eigen::VectorXd q_cur, Eigen::VectorXd q_dot_cur, Eigen::Matrix<double, 7,7> M) {
         auto [q_des, q_dot_des, q_ddot_des] = get_q(t, q_init, q_fin);
+	log_ad_ << time() << " " << (q_cur - q_des).transpose() << endl; 
         return Kp * (q_des - q_cur) + Kd * (q_dot_des  - q_dot_cur) + M * q_ddot_des;
     }
 
@@ -687,8 +700,6 @@ private:
     }
 
     array<double, 7> processApproachPointComputationPhase() {
-	log_ << time() <<  " waiting for compututions to finish " << std::endl;
-
 	if (apResult.finished.load()) {
 	    log_ << time() <<  "changing state to approaching; before" << std::endl;   	
             std::lock_guard<std::mutex> lock(apResult.apResultMutex);		
@@ -708,7 +719,7 @@ private:
     }
 
     array<double, 7> processApproachPhase() {
-
+        
         if (approachParams.start_time <= time_stamp && time_stamp <= approachParams.start_time + approachParams.exe_time) {
             array<double, 7> coriolis_array = model.coriolis(robot_state);
             array<double, 49> mass_array = model.mass(robot_state);
@@ -720,7 +731,7 @@ private:
 
             Eigen::VectorXd tau_cmd = Eigen::VectorXd::Zero(7);
             tau_cmd  = first_phase_controller(time_stamp - approachParams.start_time, q_base, approachParams.approach_config, q, dq, mass);
-            tau_cmd += coriolis;
+	    tau_cmd += coriolis;
             std::array<double, 7> tau_d_array{};
             Eigen::VectorXd::Map(&tau_d_array[0], 7) = tau_cmd;
             return tau_d_array;
@@ -900,11 +911,11 @@ int main(int argc, char ** argv) {
     franka::RobotState initial_state = robot.readOnce();
     string mode = argv[2];
 
-    StateController controller(model, 600, 25);
+    StateController controller(model, 600, 90);
     
     rs2::pipeline pipe;
     rs2::config cfg;
-    const int fps = 6;
+    const int fps = 30;
     cfg.enable_stream(RS2_STREAM_COLOR, 1920, 1080, RS2_FORMAT_RGB8, fps);
     cfg.enable_stream(RS2_STREAM_DEPTH, 848, 480, RS2_FORMAT_Z16, fps);
     cfg.enable_device("944122072327");
