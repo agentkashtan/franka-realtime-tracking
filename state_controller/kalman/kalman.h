@@ -8,10 +8,10 @@
 class MovementEstimator {
 public:
     // Constructor
-    MovementEstimator(Eigen::VectorXd init_position, double init_time, Eigen::MatrixXd init_P);
+    MovementEstimator(Eigen::VectorXd init_state, double init_time, Eigen::MatrixXd init_P);
 
     // Predict function declaration
-    std::pair<Eigen::VectorXd, double> get_state();
+    std::pair<Eigen::VectorXd, Eigen::MatrixXd> get_state();
     void predict(double t);
     void correct(Eigen::Vector3d measurement);
 

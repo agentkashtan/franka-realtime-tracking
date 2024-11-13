@@ -384,10 +384,13 @@ int main(int argc, char ** argv)
      
 
 
+    Eigen::VectorXd q_test_speed_s(7);
+    q_test_speed_s <<   -1.11004,   0.168485,   0.352721,   -1.78625, 0.00336914,    2.10711, -0.0505298;
 
+    Eigen::VectorXd q_test_speed_e(7);
+    q_test_speed_e << -1.16647,   0.715219,   0.263238,   -2.15056, -0.0148156  ,  2.94432    ,  -0.14;
 
-
-
+   
 
 
         string mode = argv[2];
@@ -395,38 +398,9 @@ int main(int argc, char ** argv)
 
      Eigen::Vector3d move_to;
              Eigen::VectorXd q_test;
-     if (mode=="true"){
-     if (argc > 3) { // Ensure there is at least one argument
-        string arg = argv[3]; // Get the first argument
-
-        // Use a stringstream to split the string
-        std::stringstream ss(arg);
-        std::string item;
-        double values[3]; // Array to hold the parsed numbers
-
-        // Parse the three values
-        for (int i = 0; i < 3; ++i) {
-            std::getline(ss, item, ','); // Split by comma
-            values[i] = std::stod(item); // Convert string to double
-        }
-
-        // Create an Eigen::Vector3d with the parsed values
-       move_to = Eigen::Vector3d(values[0], values[1], values[2]);
-       
-    } else {
-        std::cerr << "No arguments provided." << std::endl;
-        return 1; // Exit with
-		  // an error cod
-    }
-      q_test = d_compute_ik(q_init, move_to);
-
-     }
-   
-    cout << "test: " << q_test << endl;
      
    
-
-     
+     if (mode == "true") cout << completion_time(q_init, q_test_speed_s) << endl; else cout << completion_time(q_init, q_test_speed_e) << endl; 
     auto control_callback = [&](const franka::RobotState& robot_state,
                                       franka::Duration period) -> franka::Torques {
         time += period.toSec();
@@ -442,11 +416,9 @@ int main(int argc, char ** argv)
         Eigen::VectorXd tau_cmd = Eigen::VectorXd::Zero(7);
 
 	if (mode == "true") { 
-		tau_cmd = first_phase_controller(time, q_init, q_test, q, dq, mass);
-		Eigen::Matrix4d T_ee_o(Eigen::Matrix4d::Map(robot_state.O_T_EE.data()));
-		cout << T_ee_o(0, 3) << " " << T_ee_o(1,3) << " " << T_ee_o(2,3) << endl; 
+		tau_cmd = first_phase_controller(time, q_init, q_test_speed_s, q, dq, mass); 
 	} else {
-	 tau_cmd = first_phase_controller(time, q_init, q_prob, q, dq, mass);
+	 tau_cmd = first_phase_controller(time, q_init, q_test_speed_e, q, dq, mass);
 
 	/*cout << "r" << endl;
 	if (time <= ff_time) {

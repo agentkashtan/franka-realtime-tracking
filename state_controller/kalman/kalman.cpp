@@ -4,7 +4,7 @@
 
 using namespace std;
 
-MovementEstimator::MovementEstimator(Eigen::VectorXd init_position, double init_time, Eigen::MatrixXd init_P) {
+MovementEstimator::MovementEstimator(Eigen::VectorXd init_state, double init_time, Eigen::MatrixXd init_P) {
     H = Eigen::MatrixXd::Zero(3 ,6);
     H.leftCols(3) = Eigen::MatrixXd::Identity(3, 3);  
     Q = Eigen::MatrixXd::Identity(6 ,6) *0.001;
@@ -13,8 +13,7 @@ MovementEstimator::MovementEstimator(Eigen::VectorXd init_position, double init_
     R = Eigen::MatrixXd::Identity(3, 3) * 0.0004;  
     P = init_P;
     prev_t = init_time;
-    state_estimate = Eigen::VectorXd::Zero(6);
-    state_estimate.head(3) = init_position;
+    state_estimate = init_state;
 }
 
 void MovementEstimator::correct(Eigen::Vector3d measurement) {
@@ -27,9 +26,9 @@ void MovementEstimator::correct(Eigen::Vector3d measurement) {
     P = new_P;
 }
 
-std::pair<Eigen::VectorXd, double> MovementEstimator::get_state() {
+std::pair<Eigen::VectorXd, Eigen::MatrixXd> MovementEstimator::get_state() {
     std::lock_guard<std::mutex> lock(mutex_);
-    return {state_estimate, P.norm()};
+    return {state_estimate, P};
 }
 
 void MovementEstimator::predict(double t) {
