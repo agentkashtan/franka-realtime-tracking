@@ -129,15 +129,29 @@ struct ApproachParams {
     double exe_time;
 };
 
+struct ObjPosition {
+	double time_stamp;
+	Eigen::Vector3d data;
+};
+
 struct VisualServoingParams {
     double start_time;
-    MovementEstimator* estimator;
+    double prev_time_stamp;
+    bool init;
+    Eigen::Vector3d measured_position;
+    Eigen::Vector3d desired_position;
+    Eigen::Matrix3d desired_orientation;
 };
 
 struct PreVisualServoingParams {
     bool updated;
     Eigen::VectorXd state;
     Eigen::MatrixXd P;
+};
+
+
+int sgn(double a) {
+ return a > 0 ? 1 : -1;
 };
 
 
@@ -205,6 +219,8 @@ array<double, 7> ZERO_TORQUES = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
                         std::lock_guard<std::mutex> lock(cameraDataMutex);
                         frame_number = 0;
                         cameraData = { true, g_T_c * camera_T_tag, false, true };
+			//cout << camera_T_tag.translation().transpose() << endl;
+
                     } else {
                         std::lock_guard<std::mutex> lock(cameraDataMutex);
                         frame_number ++;
@@ -240,7 +256,7 @@ public:
             log_pp_ = std::ofstream("/dev/shm/predicted_pose.log");
             log_vel_ = std::ofstream("/dev/shm/velocity.log");
             log_ad_ = std::ofstream("/dev/shm/a_data.log");
-	    
+	    log_vs_ = std::ofstream("/dev/shm/vs_data.log");
 	    start = std::chrono::high_resolution_clock::now();
 	    Kp.diagonal() << 200, 200, 200, 200, 200, 200,200;
             Kd.diagonal() << 20, 20, 20, 20, 20, 20, 8;
@@ -300,6 +316,7 @@ private:
     std::ofstream log_pp_;
     std::ofstream log_vel_;
     std::ofstream log_ad_;
+     std::ofstream log_vs_;
 
 
     std::chrono::high_resolution_clock::time_point start;
@@ -383,6 +400,7 @@ private:
 	std::lock_guard<std::mutex> lock(cameraDataMutex);
 	convert_to_global(cameraData);
         if (cameraData.detected) {
+           // cout << cameraData.pose.translation().transpose() << endl;
             missingFrames = 0;
 	    observationParams.estimator->predict(time_stamp);
 	    if (cameraData.new_data) {
@@ -392,7 +410,7 @@ private:
 		//cout << positions.size() << endl;
 		if (positions.size() > observationWindow) {
 			auto res = observationParams.estimator->get_state();
-			approachPointComputingParams = { time_stamp, res.first.head(3), res.first.tail(3), cameraData.pose.rotation() };
+			approachPointComputingParams = { time_stamp, res.first.head(3), res.first.tail(3), cameraData.pose.linear() };
                         preVisualServoingParams.updated = true;
 		        preVisualServoingParams.state = res.first; 
 		        preVisualServoingParams.P = res.second;
@@ -752,27 +770,27 @@ private:
         Eigen::DiagonalMatrix<double, 7> Kd(20, 20, 20, 20, 20, 20, 8);
         
         Eigen::Vector3d offset;
-        offset << pose.rotation().col(2) * OFFSET_LENGTH;
+        offset << pose.linear().col(2) * OFFSET_LENGTH;
         Eigen::Vector3d obj_position = pose.translation() + offset;
-        Eigen::Vector3d error_pos = obj_position - T_ee_0.topRightCorner<3,1>();
-
+        
+	Eigen::Vector3d error_pos = obj_position - T_ee_0.topRightCorner<3,1>();
+        
         Eigen::Matrix3d r_desired = Eigen::Matrix3d::Identity();
-        r_desired.col(0) << pose.rotation().col(0);
-        r_desired.col(1) << - pose.rotation().col(1);
-        r_desired.col(2) << - pose.rotation().col(2);
+        r_desired.col(0) << pose.linear().col(0);
+        r_desired.col(1) << - pose.linear().col(1);
+        r_desired.col(2) << - pose.linear().col(2);
 
 	
 	Eigen::Matrix3d r_diff = r_desired * T_ee_0.topLeftCorner<3,3>().transpose();
         Eigen::AngleAxisd angle_axis(r_diff);
-	cout << "axis " << angle_axis.axis() << "; angle " <<  angle_axis.angle() << endl;
-                 throw runtime_error("temp stop");
+	
 
         Eigen::Vector3d error_orient = angle_axis.axis() * angle_axis.angle();
 
         Eigen::VectorXd error_p(6);
         error_p.head(3) = error_pos;
         error_p.tail(3) = error_orient;
-
+        log_ik_ << time() <<  " from VS " << error_p.transpose() << endl;
         Eigen::VectorXd q_dot_des_ts = Eigen::VectorXd::Zero(6);
         q_dot_des_ts.head(3) = obj_velocity;
         Eigen::VectorXd q_dot_des_js = w.inverse() * jacobian.transpose() * (jacobian * w.inverse() * jacobian.transpose()).inverse() * q_dot_des_ts;
@@ -793,10 +811,15 @@ private:
         
         if (!preVisualServoingParams.updated) throw runtime_error("init params for VS werent set");
 
-        MovementEstimator* estimator = new MovementEstimator(preVisualServoingParams.state, time_stamp, preVisualServoingParams.P);
+        //MovementEstimator* estimator = new MovementEstimator(preVisualServoingParams.state, time_stamp, preVisualServoingParams.P);
  
-	visualServoingParams = {time_stamp, nullptr};
-       	return maintain_base_pos(); 
+	visualServoingParams = { time_stamp, time_stamp,  false, Eigen::VectorXd::Zero(3), Eigen::VectorXd::Zero(3), Eigen::MatrixXd::Identity(3, 3) };
+       	
+	std::lock_guard<std::mutex> lock(cameraDataMutex);
+        cameraData.new_data = false;
+
+	
+	return maintain_base_pos(); 
     } 
 
     array<double, 7> processVisualServoing() {
@@ -816,64 +839,59 @@ private:
         Eigen::Matrix4d T_ee_0(Eigen::Matrix4d::Map(robot_state.O_T_EE.data()));
 
         q_base = q;
-        Eigen::Isometry3d prev_is;
-        if (cameraData.new_data) {
-		cameraData.new_data = false;
-		if (cameraData.detected) {
-                        if (visualServoingParams.estimator == nullptr){
-				if (!preVisualServoingParams.updated) throw runtime_error("init params for VS werent set");
-                                Eigen::VectorXd init_state = preVisualServoingParams.state;
-				init_state.head(3) = cameraData.pose.translation();
-				visualServoingParams.estimator = new MovementEstimator(init_state, time_stamp, preVisualServoingParams.P);
-                        }
-			missingFrames = 0;
-			visualServoingParams.estimator->correct(cameraData.pose.translation());
-		        prev_is = cameraData.pose;
-		} else {
-			missingFrames ++;
-			if (missingFrames > 100){
-				throw runtime_error("lost the obj during visual servoing");
-                        }
-			
-		}
 
 
-        }
-	if (visualServoingParams.estimator == nullptr) return maintain_base_pos();
-	else {
-
-	visualServoingParams.estimator->predict(time_stamp);
-	auto res = visualServoingParams.estimator->get_state();
+        double MAX_RATE = 0.00005;
         
+        if (cameraData.new_data) {
+		if (cameraData.detected) {
+			if (!visualServoingParams.init) {
+				visualServoingParams.init = true;
+				visualServoingParams.desired_position = cameraData.pose.translation();
+				visualServoingParams.prev_time_stamp = time_stamp;
+			}	
+			visualServoingParams.measured_position = cameraData.pose.translation();
+			visualServoingParams.desired_orientation = cameraData.pose.linear();
+		        log_ik_ << time() <<  " --->new frame<---" << endl;
+		}
+	}
+
+        log_ik_ << time() << " desired posistion " << visualServoingParams.desired_position.transpose()  << endl;
+	log_ik_ << time() << "m measured posistion " << visualServoingParams.measured_position.transpose() << endl << endl;
+         
+        if (!visualServoingParams.init) return maintain_base_pos();
+
+        Eigen::Vector3d desired_change = visualServoingParams.measured_position - visualServoingParams.desired_position;
+        desired_change = desired_change.cwiseMin(MAX_RATE);
+	desired_change = desired_change.cwiseMax(- MAX_RATE);
+
+	Eigen::Vector3d velocity = Eigen::Vector3d::Zero(3);
+
+        if (time_stamp - visualServoingParams.prev_time_stamp > 0.00001) {
+		visualServoingParams.desired_position += desired_change / (time_stamp - visualServoingParams.prev_time_stamp);
+	        velocity = desired_change / (time_stamp - visualServoingParams.prev_time_stamp);
+        }
+	
+        visualServoingParams.prev_time_stamp = time_stamp;
+        velocity = approachPointComputingParams.velocity;//Eigen::Vector3d::Zero();
+        log_vs_ << time() << visualServoingParams.desired_position.transpose() << " " << visualServoingParams.measured_position.transpose() << endl;
+        Eigen::Isometry3d vs_pose_data;
+        vs_pose_data.translation() = visualServoingParams.desired_position;
+        vs_pose_data.linear() = visualServoingParams.desired_orientation;
+log_ik_ << "typost' " << visualServoingParams.desired_position << " " << vs_pose_data.translation().transpose() << endl;
+	
+
 
         Eigen::VectorXd tau_cmd = Eigen::VectorXd::Zero(7);
-            //
+        tau_cmd = visual_servoing_controller(q, dq, vs_pose_data, velocity, jacobian, T_ee_0); // get velocity somewhere ?
+       
+        //throw runtime_error("vot tak");
 
-        Eigen::Vector3d velocity = res.first.tail(3);
-     
-	prev_is.translation() = res.first.head(3);
-         cout << " VS DATA: " << res.first.transpose() << endl; 
-        tau_cmd = visual_servoing_controller(q, dq, prev_is, velocity, jacobian, T_ee_0); // get velocity somewhere ?
+        tau_cmd += coriolis;
 
-	tau_cmd += coriolis;
-    
         std::array<double, 7> tau_d_array{};
         Eigen::VectorXd::Map(&tau_d_array[0], 7) = tau_cmd;
         return tau_d_array;
-	}
-    
-            //throw runtime_error("stopped vs");
-
-
-
-
-
-
-
-
-
-
-
 
 
 
@@ -881,12 +899,7 @@ private:
 
 
 	if (cameraData.detected) {
-            missingFrames = 0;
-            array<double, 7> coriolis_array = model.coriolis(robot_state);
-            array<double, 49> mass_array = model.mass(robot_state);
-            array<double, 42> jacobian_array = model.zeroJacobian(franka::Frame::kEndEffector, robot_state);
-
-            Eigen::Map<const Eigen::Matrix<double, 7, 7>> mass(mass_array.data());
+ 
             Eigen::Map<const Eigen::Matrix<double, 7, 1>> coriolis(coriolis_array.data());
             Eigen::Map<const Eigen::Matrix<double, 6, 7>> jacobian(jacobian_array.data());
             Eigen::Map<const Eigen::Matrix<double, 7, 1>> q(robot_state.q.data());
@@ -927,6 +940,7 @@ private:
 
     }
 
+    
 
     Eigen::Vector3d calculateCentroid(const std::vector<Eigen::Vector3d>& points) {
         Eigen::Vector3d centroid(0, 0, 0);
