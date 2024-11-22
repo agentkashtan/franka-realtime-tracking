@@ -141,6 +141,8 @@ struct VisualServoingParams {
     Eigen::Vector3d measured_position;
     Eigen::Vector3d desired_position;
     Eigen::Matrix3d desired_orientation;
+    MovementEstimator* estimator;
+    Eigen::Vector3d lpf_state;
 };
 
 struct PreVisualServoingParams {
@@ -811,9 +813,9 @@ private:
         
         if (!preVisualServoingParams.updated) throw runtime_error("init params for VS werent set");
 
-        //MovementEstimator* estimator = new MovementEstimator(preVisualServoingParams.state, time_stamp, preVisualServoingParams.P);
+        MovementEstimator* estimator = new MovementEstimator(preVisualServoingParams.state, time_stamp, preVisualServoingParams.P);
  
-	visualServoingParams = { time_stamp, time_stamp,  false, Eigen::VectorXd::Zero(3), Eigen::VectorXd::Zero(3), Eigen::MatrixXd::Identity(3, 3) };
+	visualServoingParams = { time_stamp, time_stamp,  false, Eigen::VectorXd::Zero(3), Eigen::VectorXd::Zero(3), Eigen::MatrixXd::Identity(3, 3), estimator, Eigen::VectorXd::Zero(3) };
        	
 	std::lock_guard<std::mutex> lock(cameraDataMutex);
         cameraData.new_data = false;
@@ -841,18 +843,21 @@ private:
         q_base = q;
 
 
-        double MAX_RATE = 0.00005;
-        
+        double MAX_RATE = 0.0001;
+        double alpha = 0.95;
         if (cameraData.new_data) {
 		if (cameraData.detected) {
 			if (!visualServoingParams.init) {
 				visualServoingParams.init = true;
 				visualServoingParams.desired_position = cameraData.pose.translation();
+				visualServoingParams.lpf_state = cameraData.pose.translation();
 				visualServoingParams.prev_time_stamp = time_stamp;
 			}	
 			visualServoingParams.measured_position = cameraData.pose.translation();
 			visualServoingParams.desired_orientation = cameraData.pose.linear();
 		        log_ik_ << time() <<  " --->new frame<---" << endl;
+			visualServoingParams.estimator->correct(visualServoingParams.measured_position);
+
 		}
 	}
 
@@ -860,23 +865,35 @@ private:
 	log_ik_ << time() << "m measured posistion " << visualServoingParams.measured_position.transpose() << endl << endl;
          
         if (!visualServoingParams.init) return maintain_base_pos();
+        
 
-        Eigen::Vector3d desired_change = visualServoingParams.measured_position - visualServoingParams.desired_position;
-        desired_change = desired_change.cwiseMin(MAX_RATE);
+        visualServoingParams.estimator->predict(time_stamp);
+	auto data = visualServoingParams.estimator->get_state();
+	Eigen::Vector3d measured_position = data.first.head(3); 
+        Eigen::Vector3d desired_change = measured_position - visualServoingParams.desired_position;
+
+	desired_change = desired_change.cwiseMin(MAX_RATE);
 	desired_change = desired_change.cwiseMax(- MAX_RATE);
 
 	Eigen::Vector3d velocity = Eigen::Vector3d::Zero(3);
 
         if (time_stamp - visualServoingParams.prev_time_stamp > 0.00001) {
-		visualServoingParams.desired_position += desired_change / (time_stamp - visualServoingParams.prev_time_stamp);
-	        velocity = desired_change / (time_stamp - visualServoingParams.prev_time_stamp);
-        }
-	
-        visualServoingParams.prev_time_stamp = time_stamp;
-        velocity = approachPointComputingParams.velocity;//Eigen::Vector3d::Zero();
-        log_vs_ << time() << visualServoingParams.desired_position.transpose() << " " << visualServoingParams.measured_position.transpose() << endl;
-        Eigen::Isometry3d vs_pose_data;
-        vs_pose_data.translation() = visualServoingParams.desired_position;
+		visualServoingParams.desired_position += desired_change;
+		Eigen::Vector3d prev_state = visualServoingParams.lpf_state;
+
+		visualServoingParams.lpf_state = alpha * visualServoingParams.lpf_state + (1 - alpha) * visualServoingParams.desired_position;
+                velocity = (visualServoingParams.lpf_state - prev_state) / (time_stamp - visualServoingParams.prev_time_stamp);
+
+		//velocity = desired_change / (time_stamp - visualServoingParams.prev_time_stamp);
+        } 
+
+        log_vs_ << time() <<  visualServoingParams.measured_position.transpose() << " " << visualServoingParams.desired_position.transpose() << " " << measured_position.transpose() << " " << visualServoingParams.lpf_state.transpose() << endl;
+
+	visualServoingParams.prev_time_stamp = time_stamp;
+        //velocity = approachPointComputingParams.velocity;//Eigen::Vector3d::Zero();
+
+	Eigen::Isometry3d vs_pose_data;
+        vs_pose_data.translation() = visualServoingParams.lpf_state; //visualServoingParams.desired_position;
         vs_pose_data.linear() = visualServoingParams.desired_orientation;
 log_ik_ << "typost' " << visualServoingParams.desired_position << " " << vs_pose_data.translation().transpose() << endl;
 	
