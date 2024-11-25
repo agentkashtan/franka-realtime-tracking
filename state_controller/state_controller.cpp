@@ -259,6 +259,9 @@ public:
             log_vel_ = std::ofstream("/dev/shm/velocity.log");
             log_ad_ = std::ofstream("/dev/shm/a_data.log");
 	    log_vs_ = std::ofstream("/dev/shm/vs_data.log");
+	    log_vs_rp_ = std::ofstream("/dev/shm/vs_data_actual_pos.log");
+	    
+	    
 	    start = std::chrono::high_resolution_clock::now();
 	    Kp.diagonal() << 200, 200, 200, 200, 200, 200,200;
             Kd.diagonal() << 20, 20, 20, 20, 20, 20, 8;
@@ -318,8 +321,8 @@ private:
     std::ofstream log_pp_;
     std::ofstream log_vel_;
     std::ofstream log_ad_;
-     std::ofstream log_vs_;
-
+    std::ofstream log_vs_;
+    std::ofstream log_vs_rp_;
 
     std::chrono::high_resolution_clock::time_point start;
     double OFFSET_LENGTH = 0.25;
@@ -417,16 +420,17 @@ private:
 		        preVisualServoingParams.state = res.first; 
 		        preVisualServoingParams.P = res.second;
 			delete observationParams.estimator;
+			observationParams.estimator = nullptr;
 			cout << "velocity: " << res.first.tail(3).transpose() << endl;
 			startApproachPointComputationPhase();
 		}
 	    }
-
+            if (observationParams.estimator!= nullptr){
             auto res = observationParams.estimator->get_state();
 	    log_rp_ << cameraData.pose.translation().transpose() << endl;
             log_pp_ << res.first.head(3).transpose() << " " << res.second.norm() << endl;
             log_vel_ << res.first.tail(3).transpose() << endl;
-
+            }
             /*
 	    if (cameraData.newData) {
 	    	observationParams.estimator->predict(time_stamp);
@@ -447,6 +451,7 @@ private:
         } else {
             handleMissingFrame();
         }
+	log_ << time() << " finished observing " << endl;
         return maintain_base_pos();
     }
 
@@ -713,6 +718,8 @@ private:
         apResult.finished.store(false);
 	new_thread_ = std::thread(&StateController::compute_approach_point_mth, this);
         state = State::ComputingApproachPoint;
+	log_ << endl << time() << " exited startApproachPointComputationPhase()" << endl;
+
     }
 
     array<double, 7> processApproachPointComputationPhase() {
@@ -773,7 +780,8 @@ private:
         
         Eigen::Vector3d offset;
         offset << pose.linear().col(2) * OFFSET_LENGTH;
-        Eigen::Vector3d obj_position = pose.translation() + offset;
+	//disabled smart offset for now
+        Eigen::Vector3d obj_position = pose.translation() + Eigen::Vector3d(0, 0, 0.2);// offset;
         
 	Eigen::Vector3d error_pos = obj_position - T_ee_0.topRightCorner<3,1>();
         
@@ -813,9 +821,7 @@ private:
         
         if (!preVisualServoingParams.updated) throw runtime_error("init params for VS werent set");
 
-        MovementEstimator* estimator = new MovementEstimator(preVisualServoingParams.state, time_stamp, preVisualServoingParams.P);
- 
-	visualServoingParams = { time_stamp, time_stamp,  false, Eigen::VectorXd::Zero(3), Eigen::VectorXd::Zero(3), Eigen::MatrixXd::Identity(3, 3), estimator, Eigen::VectorXd::Zero(3) };
+	visualServoingParams = { time_stamp, time_stamp,  false, Eigen::VectorXd::Zero(3), Eigen::VectorXd::Zero(3), Eigen::MatrixXd::Identity(3, 3), nullptr, Eigen::VectorXd::Zero(3) };
        	
 	std::lock_guard<std::mutex> lock(cameraDataMutex);
         cameraData.new_data = false;
@@ -852,7 +858,16 @@ private:
 				visualServoingParams.desired_position = cameraData.pose.translation();
 				visualServoingParams.lpf_state = cameraData.pose.translation();
 				visualServoingParams.prev_time_stamp = time_stamp;
+
+                                
+				Eigen::VectorXd new_kf_state = preVisualServoingParams.state;
+				new_kf_state.head(3) = cameraData.pose.translation();
+
+				MovementEstimator* estimator = new MovementEstimator(new_kf_state, time_stamp, preVisualServoingParams.P);
+                                visualServoingParams.estimator = estimator;
+
 			}	
+			
 			visualServoingParams.measured_position = cameraData.pose.translation();
 			visualServoingParams.desired_orientation = cameraData.pose.linear();
 		        log_ik_ << time() <<  " --->new frame<---" << endl;
@@ -882,15 +897,13 @@ private:
 		Eigen::Vector3d prev_state = visualServoingParams.lpf_state;
 
 		visualServoingParams.lpf_state = alpha * visualServoingParams.lpf_state + (1 - alpha) * visualServoingParams.desired_position;
-                velocity = (visualServoingParams.lpf_state - prev_state) / (time_stamp - visualServoingParams.prev_time_stamp);
+                velocity = data.first.tail(3);//(visualServoingParams.lpf_state - prev_state) / (time_stamp - visualServoingParams.prev_time_stamp);
+                visualServoingParams.prev_time_stamp = time_stamp;
 
-		//velocity = desired_change / (time_stamp - visualServoingParams.prev_time_stamp);
-        } 
+        } else cout <<"min time exceeded" << endl; 
 
-        log_vs_ << time() <<  visualServoingParams.measured_position.transpose() << " " << visualServoingParams.desired_position.transpose() << " " << measured_position.transpose() << " " << visualServoingParams.lpf_state.transpose() << endl;
-
-	visualServoingParams.prev_time_stamp = time_stamp;
-        //velocity = approachPointComputingParams.velocity;//Eigen::Vector3d::Zero();
+        log_vs_ << time() << " "  <<  visualServoingParams.measured_position.transpose() << " " << visualServoingParams.desired_position.transpose() << " " << measured_position.transpose() << " " << visualServoingParams.lpf_state.transpose() << " " << velocity.transpose() << endl;
+	log_vs_rp_ << time() << " " << T_ee_0.topRightCorner<3,1>().transpose() << endl;
 
 	Eigen::Isometry3d vs_pose_data;
         vs_pose_data.translation() = visualServoingParams.lpf_state; //visualServoingParams.desired_position;
