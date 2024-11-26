@@ -897,7 +897,8 @@ private:
 		Eigen::Vector3d prev_state = visualServoingParams.lpf_state;
 
 		visualServoingParams.lpf_state = alpha * visualServoingParams.lpf_state + (1 - alpha) * visualServoingParams.desired_position;
-                velocity = data.first.tail(3);//(visualServoingParams.lpf_state - prev_state) / (time_stamp - visualServoingParams.prev_time_stamp);
+                velocity = (visualServoingParams.lpf_state - prev_state) / (time_stamp - visualServoingParams.prev_time_stamp);
+                //data.first.tail(3);  (visualServoingParams.lpf_state - prev_state) / (time_stamp - visualServoingParams.prev_time_stamp);
                 visualServoingParams.prev_time_stamp = time_stamp;
 
         } else cout <<"min time exceeded" << endl; 
