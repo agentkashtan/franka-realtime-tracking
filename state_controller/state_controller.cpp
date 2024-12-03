@@ -157,16 +157,42 @@ int sgn(double a) {
 };
 
 
+bool new_cam = false;
+
 
 array<double, 7> ZERO_TORQUES = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
 
-
-    void realsense_callback(const rs2::frame& frame) {
+void realsense_callback(const rs2::frame& frame) {
 
             Eigen::Isometry3d g_T_c;
             g_T_c.setIdentity();
             g_T_c.linear() = Eigen::AngleAxisd(-1.57, Eigen::Vector3d::UnitZ()).toRotationMatrix();
             g_T_c.translation() << -0.03, 0., -0.06;
+            
+
+	    //new camera and mount
+	    Eigen::Isometry3d g_T_cad;            
+	    g_T_cad.setIdentity();
+	    g_T_cad.linear() << 0, -1, 0,
+		                -1, 0, 0,
+				0, 0, -1;
+
+	    
+	    Eigen::Isometry3d cad_T_cam_c;
+            cad_T_cam_c.setIdentity();
+	    cad_T_cam_c.linear() << -1, 0, 0,
+		                    0, +1/sqrt(2), -1/sqrt(2),
+				    0, -1/sqrt(2), -1/sqrt(2);
+	    cad_T_cam_c.translation() << 0, 0.10069, -0.0148;
+	    
+	    
+	    Eigen::Isometry3d cam_c_T_c;
+            cam_c_T_c.setIdentity();
+	    cam_c_T_c.translation() << -0.009, 0, 0;
+             
+	    Eigen::Isometry3d new_g_T_c = g_T_cad * cad_T_cam_c * cam_c_T_c;
+
+
 
             rs2::frameset fs = frame.as<rs2::frameset>();
             if(!fs)return;
@@ -221,8 +247,18 @@ array<double, 7> ZERO_TORQUES = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
                         std::lock_guard<std::mutex> lock(cameraDataMutex);
                         frame_number = 0;
                         cameraData = { true, g_T_c * camera_T_tag, false, true };
-			//cout << camera_T_tag.translation().transpose() << endl;
+			if (!new_cam) cout << (g_T_c * camera_T_tag).translation().transpose() << endl;
+		       	else {
+			       	//cout << (camera_T_tag).translation().transpose() << endl; 
+	                       // cout <<  (cam_c_T_c * camera_T_tag).translation().transpose() << endl;
+                           
+                               // cout << (cam_c_T_c * camera_T_tag).linear().transpose() << endl;
+                                cout <<  (cad_T_cam_c * cam_c_T_c * camera_T_tag).translation().transpose() << endl;
+				                                cout <<  (cad_T_cam_c * cam_c_T_c * camera_T_tag).linear() << endl;
 
+				//cout << (new_g_T_c * camera_T_tag).translation().transpose() << endl;
+				cout << endl;
+			}
                     } else {
                         std::lock_guard<std::mutex> lock(cameraDataMutex);
                         frame_number ++;
@@ -411,7 +447,7 @@ private:
 	    if (cameraData.new_data) {
 	    	observationParams.estimator->correct(cameraData.pose.translation());
 	 	cameraData.new_data = false;
-	        positions.push_back(cameraData.pose.translation());
+	        //positions.push_back(cameraData.pose.translation());
 		//cout << positions.size() << endl;
 		if (positions.size() > observationWindow) {
 			auto res = observationParams.estimator->get_state();
@@ -449,7 +485,7 @@ private:
 	    }
 	  */
         } else {
-            handleMissingFrame();
+            //handleMissingFrame();
         }
 	log_ << time() << " finished observing " << endl;
         return maintain_base_pos();
@@ -898,7 +934,9 @@ private:
 
 		visualServoingParams.lpf_state = alpha * visualServoingParams.lpf_state + (1 - alpha) * visualServoingParams.desired_position;
                 velocity = (visualServoingParams.lpf_state - prev_state) / (time_stamp - visualServoingParams.prev_time_stamp);
-                //data.first.tail(3);  (visualServoingParams.lpf_state - prev_state) / (time_stamp - visualServoingParams.prev_time_stamp);
+              // velocity = data.first.tail(3);
+
+	       	//data.first.tail(3);  (visualServoingParams.lpf_state - prev_state) / (time_stamp - visualServoingParams.prev_time_stamp);
                 visualServoingParams.prev_time_stamp = time_stamp;
 
         } else cout <<"min time exceeded" << endl; 
@@ -1040,9 +1078,19 @@ int main(int argc, char ** argv) {
     rs2::pipeline pipe;
     rs2::config cfg;
     const int fps = 30;
-    cfg.enable_stream(RS2_STREAM_COLOR, 1920, 1080, RS2_FORMAT_RGB8, fps);
-    cfg.enable_stream(RS2_STREAM_DEPTH, 848, 480, RS2_FORMAT_Z16, fps);
-    cfg.enable_device("944122072327");
+    if (mode == "true") {
+    	new_cam = true;
+	cfg.enable_stream(RS2_STREAM_COLOR, 1280, 720, RS2_FORMAT_RGB8, fps);
+        cfg.enable_stream(RS2_STREAM_DEPTH, 1280, 720, RS2_FORMAT_Z16, fps);
+        cfg.enable_device("123622270300");
+    } else {
+    	new_cam = false;
+	cfg.enable_stream(RS2_STREAM_COLOR, 1920, 1080, RS2_FORMAT_RGB8, fps);
+	cfg.enable_stream(RS2_STREAM_DEPTH, 848, 480, RS2_FORMAT_Z16, fps);
+	cfg.enable_device("944122072327");
+
+    }
+
     pipe.start(cfg, realsense_callback);
     auto intrinsics = pipe.get_active_profile().get_stream(rs2_stream::RS2_STREAM_COLOR).as<rs2::video_stream_profile>().get_intrinsics();
 
@@ -1057,28 +1105,9 @@ int main(int argc, char ** argv) {
                                       franka::Duration period) -> franka::Torques {
         time += period.toSec();
         std::array<double, 7> tau_d_array{};
-	/*
-        if (mode == "true")  {
-                array<double, 7> coriolis_array = model.coriolis(robot_state);
-                array<double, 49> mass_array = model.mass(robot_state);
-                Eigen::Map<const Eigen::Matrix<double, 7, 7>> mass(mass_array.data());
-                Eigen::Map<const Eigen::Matrix<double, 7, 1>> coriolis(coriolis_array.data());
-                Eigen::Map<const Eigen::Matrix<double, 7, 1>> q(robot_state.q.data());
-                Eigen::Map<const Eigen::Matrix<double, 7, 1>> dq(robot_state.dq.data());
-                Eigen::Matrix4d T_ee_o(Eigen::Matrix4d::Map(robot_state.O_T_EE.data()));
-                Eigen::VectorXd tau_cmd = Eigen::VectorXd::Zero(7);
-                //tau_cmd = first_phase_controller(time, q_init, q_test_init, q, dq, mass);
-                tau_cmd += coriolis;
-                Eigen::VectorXd::Map(&t
-        }
-        else {
-            tau_d_array = controller.update(time, robot_state);
-        }*/
-        //return tau_d_array;
-	    tau_d_array = controller.update(time, robot_state);
+	tau_d_array = controller.update(time, robot_state);
            
-  
-    	    return tau_d_array;
+    	return tau_d_array;
 
     };
     robot.control(control_callback);
