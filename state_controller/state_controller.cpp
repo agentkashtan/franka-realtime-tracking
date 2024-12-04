@@ -171,26 +171,37 @@ void realsense_callback(const rs2::frame& frame) {
             
 
 	    //new camera and mount
-	    Eigen::Isometry3d g_T_cad;            
-	    g_T_cad.setIdentity();
-	    g_T_cad.linear() << 0, -1, 0,
-		                -1, 0, 0,
+	    Eigen::Isometry3d F_T_g;
+	    F_T_g.setIdentity();
+	    F_T_g.linear() << 1/sqrt(2), 1/sqrt(2), 0,
+                              -1/sqrt(2), 1/sqrt(2), 0,
+                              0, 0, 1;
+            F_T_g.translation() << 0, 0, 0.1034;
+
+
+
+
+
+	    Eigen::Isometry3d F_T_cad;            
+	    F_T_cad.setIdentity();
+	    F_T_cad.linear() << 0, 1, 0,
+		                1, 0, 0,
 				0, 0, -1;
 
 	    
 	    Eigen::Isometry3d cad_T_cam_c;
             cad_T_cam_c.setIdentity();
-	    cad_T_cam_c.linear() << -1, 0, 0,
-		                    0, +1/sqrt(2), -1/sqrt(2),
+	    cad_T_cam_c.linear() << 1, 0, 0,
+		                    0, -1/sqrt(2), 1/sqrt(2),
 				    0, -1/sqrt(2), -1/sqrt(2);
-	    cad_T_cam_c.translation() << 0, 0.10069, -0.0148;
+	    cad_T_cam_c.translation() << 0, -0.10069, -0.0148;
 	    
 	    
 	    Eigen::Isometry3d cam_c_T_c;
             cam_c_T_c.setIdentity();
 	    cam_c_T_c.translation() << -0.009, 0, 0;
              
-	    Eigen::Isometry3d new_g_T_c = g_T_cad * cad_T_cam_c * cam_c_T_c;
+	    Eigen::Isometry3d new_g_T_c = F_T_g.inverse() * F_T_cad * cad_T_cam_c * cam_c_T_c;
 
 
 
@@ -247,14 +258,19 @@ void realsense_callback(const rs2::frame& frame) {
                         std::lock_guard<std::mutex> lock(cameraDataMutex);
                         frame_number = 0;
                         cameraData = { true, g_T_c * camera_T_tag, false, true };
-			if (!new_cam) cout << (g_T_c * camera_T_tag).translation().transpose() << endl;
+			if (!new_cam) cout << "old " << (g_T_c * camera_T_tag).translation().transpose() << endl;
 		       	else {
-			       	//cout << (camera_T_tag).translation().transpose() << endl; 
+			       	cout <<"NEW" << endl << camera_T_tag.linear() << endl << camera_T_tag.translation().transpose()<<endl << endl; 
 	                       // cout <<  (cam_c_T_c * camera_T_tag).translation().transpose() << endl;
                            
                                // cout << (cam_c_T_c * camera_T_tag).linear().transpose() << endl;
-                                cout <<  (cad_T_cam_c * cam_c_T_c * camera_T_tag).translation().transpose() << endl;
-				                                cout <<  (cad_T_cam_c * cam_c_T_c * camera_T_tag).linear() << endl;
+			        cout <<  "cam c to c " << endl << cam_c_T_c.linear() << endl << cam_c_T_c.translation().transpose() << endl << endl;
+                                cout <<  "cad to c" << endl << (cad_T_cam_c * cam_c_T_c).linear() << endl << (cad_T_cam_c * cam_c_T_c).translation().transpose() << endl <<  endl;
+                                cout <<  "f to c" << endl << (F_T_cad * cad_T_cam_c * cam_c_T_c).linear() << endl << (F_T_cad * cad_T_cam_c * cam_c_T_c).translation().transpose() << endl << endl;
+                                cout <<  "ee to c" << endl << new_g_T_c.linear() << endl << new_g_T_c.translation().transpose() << endl;
+
+                                cout <<  "new full" << endl << new_g_T_c.linear() << endl << new_g_T_c.translation().transpose() << endl;
+				//cout <<  (cad_T_cam_c * cam_c_T_c * camera_T_tag).linear() << endl;
 
 				//cout << (new_g_T_c * camera_T_tag).translation().transpose() << endl;
 				cout << endl;
@@ -447,6 +463,7 @@ private:
 	    if (cameraData.new_data) {
 	    	observationParams.estimator->correct(cameraData.pose.translation());
 	 	cameraData.new_data = false;
+	        //cout << "global " << cameraData.pose.translation().transpose() << endl;		
 	        //positions.push_back(cameraData.pose.translation());
 		//cout << positions.size() << endl;
 		if (positions.size() > observationWindow) {
@@ -1099,6 +1116,9 @@ int main(int argc, char ** argv) {
     cameraMatrix = cv::Mat(3, 3, CV_32FC1, &camera_data);
     Eigen::Map<const Eigen::Matrix<double, 7, 1>> q_init(initial_state.q.data());
     
+    Eigen::Matrix4d O_ee_0(Eigen::Matrix4d::Map(initial_state.O_T_EE.data()));
+    cout <<O_ee_0 << endl;
+ 
     controller.q_base = q_init;
     cout << q_init.transpose() << endl;
     auto control_callback = [&](const franka::RobotState& robot_state,
