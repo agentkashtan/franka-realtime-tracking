@@ -7,10 +7,10 @@ using namespace std;
 MovementEstimator::MovementEstimator(Eigen::VectorXd init_state, double init_time, Eigen::MatrixXd init_P) {
     H = Eigen::MatrixXd::Zero(3 ,6);
     H.leftCols(3) = Eigen::MatrixXd::Identity(3, 3);  
-    Q = Eigen::MatrixXd::Identity(6 ,6) *0.001;
-    Q.topLeftCorner(3, 3) = Eigen::MatrixXd::Identity(3, 3) * 0.000001;  
+    Q = Eigen::MatrixXd::Identity(6 ,6) *0.00005;
+    Q.topLeftCorner(3, 3) = Eigen::MatrixXd::Identity(3, 3) * 0.001;  
     
-    R = Eigen::MatrixXd::Identity(3, 3) * 0.0004;  
+    R = Eigen::MatrixXd::Identity(3, 3) * 0.01;  
     P = init_P;
     prev_t = init_time;
     state_estimate = init_state;

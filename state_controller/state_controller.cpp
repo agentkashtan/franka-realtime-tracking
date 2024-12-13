@@ -21,6 +21,7 @@
 #include <atomic>
 #include <chrono>
 #include <mutex>
+#include <cmath>
 
 #include "kalman.h"
 
@@ -163,48 +164,40 @@ bool new_cam = false;
 array<double, 7> ZERO_TORQUES = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
 
 void realsense_callback(const rs2::frame& frame) {
-
-            Eigen::Isometry3d g_T_c;
-            g_T_c.setIdentity();
-            g_T_c.linear() = Eigen::AngleAxisd(-1.57, Eigen::Vector3d::UnitZ()).toRotationMatrix();
-            g_T_c.translation() << -0.03, 0., -0.06;
-            
-
-	    //new camera and mount
-	    Eigen::Isometry3d F_T_g;
-	    F_T_g.setIdentity();
-	    F_T_g.linear() << 1/sqrt(2), 1/sqrt(2), 0,
-                              -1/sqrt(2), 1/sqrt(2), 0,
-                              0, 0, 1;
-            F_T_g.translation() << 0, 0, 0.1034;
-
-
-
-
-
-	    Eigen::Isometry3d F_T_cad;            
-	    F_T_cad.setIdentity();
-	    F_T_cad.linear() << 0, 1, 0,
-		                1, 0, 0,
-				0, 0, -1;
-
+	    //new camera and mounti
+	    
+	    Eigen::Isometry3d g_T_cad;
+            g_T_cad.setIdentity();
+            g_T_cad.linear() << 0, 1, 0,
+                              1, 0, 0,
+                              0, 0, -1;
+            g_T_cad.translation() << 0, 0, -0.1034;
 	    
 	    Eigen::Isometry3d cad_T_cam_c;
             cad_T_cam_c.setIdentity();
+	    double cam_c_to_cad_angle = -(5 * M_PI / 6 +  0*2 * M_PI / 180.0);
 	    cad_T_cam_c.linear() << 1, 0, 0,
-		                    0, -1/sqrt(2), 1/sqrt(2),
-				    0, -1/sqrt(2), -1/sqrt(2);
-	    cad_T_cam_c.translation() << 0, -0.10069, -0.0148;
+		                    0, cos(cam_c_to_cad_angle), -sin(cam_c_to_cad_angle),
+				    0, sin(cam_c_to_cad_angle), cos(cam_c_to_cad_angle);
+	    cad_T_cam_c.translation() << 0, -0.10069, -0.01048;
 	    
 	    
 	    Eigen::Isometry3d cam_c_T_c;
             cam_c_T_c.setIdentity();
 	    cam_c_T_c.translation() << -0.009, 0, 0;
              
-	    Eigen::Isometry3d new_g_T_c = F_T_g.inverse() * F_T_cad * cad_T_cam_c * cam_c_T_c;
+	    Eigen::Isometry3d new_g_T_c = g_T_cad * cad_T_cam_c * cam_c_T_c;
+         
+            
+	    Eigen::Isometry3d g_T_c;
+            if (new_cam) g_T_c = g_T_cad * cad_T_cam_c * cam_c_T_c;
+	    else {
+	    	g_T_c.setIdentity();
+           	g_T_c.linear() = Eigen::AngleAxisd(-1.57, Eigen::Vector3d::UnitZ()).toRotationMatrix();
+            	g_T_c.translation() << -0.03, 0., -0.06;
+            }
 
-
-
+            //cout << new_g_T_c.matrix() << endl << endl;
             rs2::frameset fs = frame.as<rs2::frameset>();
             if(!fs)return;
             rs2::video_frame cur_frame = fs.get_color_frame();
@@ -223,6 +216,7 @@ void realsense_callback(const rs2::frame& frame) {
                    cv::aruco::DetectorParameters d_params = cv::aruco::DetectorParameters();
 
                     cv::Mat image(height, width, CV_8UC(channels), const_cast<void*>(frame_data), stride);
+                    cv::cvtColor(image, image, cv::COLOR_RGB2BGR);
                     vector<int> ids;
                     vector<vector<cv::Point2f>> corners, rejected;
 
@@ -258,30 +252,32 @@ void realsense_callback(const rs2::frame& frame) {
                         std::lock_guard<std::mutex> lock(cameraDataMutex);
                         frame_number = 0;
                         cameraData = { true, g_T_c * camera_T_tag, false, true };
+
+			/*
 			if (!new_cam) cout << "old " << (g_T_c * camera_T_tag).translation().transpose() << endl;
 		       	else {
-			       	cout <<"NEW" << endl << camera_T_tag.linear() << endl << camera_T_tag.translation().transpose()<<endl << endl; 
+			       	//cout <<"NEW" << endl << camera_T_tag.linear() << endl << camera_T_tag.translation().transpose()<<endl << endl; 
 	                       // cout <<  (cam_c_T_c * camera_T_tag).translation().transpose() << endl;
                            
                                // cout << (cam_c_T_c * camera_T_tag).linear().transpose() << endl;
-			        cout <<  "cam c to c " << endl << cam_c_T_c.linear() << endl << cam_c_T_c.translation().transpose() << endl << endl;
-                                cout <<  "cad to c" << endl << (cad_T_cam_c * cam_c_T_c).linear() << endl << (cad_T_cam_c * cam_c_T_c).translation().transpose() << endl <<  endl;
-                                cout <<  "f to c" << endl << (F_T_cad * cad_T_cam_c * cam_c_T_c).linear() << endl << (F_T_cad * cad_T_cam_c * cam_c_T_c).translation().transpose() << endl << endl;
-                                cout <<  "ee to c" << endl << new_g_T_c.linear() << endl << new_g_T_c.translation().transpose() << endl;
+			        //cout <<  "cam c to c " << endl << cam_c_T_c.linear() << endl << cam_c_T_c.translation().transpose() << endl << endl;
+                                //cout <<  "cad to c" << endl << (cad_T_cam_c * cam_c_T_c).linear() << endl << (cad_T_cam_c * cam_c_T_c).translation().transpose() << endl <<  endl;
+                                //cout <<  "griper to c" << endl << (g_T_cad * cad_T_cam_c * cam_c_T_c).linear() << endl << (F_T_cad * cad_T_cam_c * cam_c_T_c).translation().transpose() << endl << endl;
+                                
 
-                                cout <<  "new full" << endl << new_g_T_c.linear() << endl << new_g_T_c.translation().transpose() << endl;
+                       
 				//cout <<  (cad_T_cam_c * cam_c_T_c * camera_T_tag).linear() << endl;
-
-				//cout << (new_g_T_c * camera_T_tag).translation().transpose() << endl;
-				cout << endl;
+                                //cout << camera_T_tag.translation().transpose() << endl;
+			//	cout << (new_g_T_c * camera_T_tag).translation().transpose() << endl << endl;
+				//cout << endl;
 			}
+			*/
                     } else {
                         std::lock_guard<std::mutex> lock(cameraDataMutex);
                         frame_number ++;
                         cameraData = { false, g_T_c * camera_T_tag, false, true };
                     }
 
-                    cv::cvtColor(image, image, cv::COLOR_RGB2BGR);
                     cv::imshow("tasde", image);
                     cv::waitKey(5);
             } catch (std::exception const & ex ) {
@@ -377,7 +373,7 @@ private:
     std::ofstream log_vs_rp_;
 
     std::chrono::high_resolution_clock::time_point start;
-    double OFFSET_LENGTH = 0.25;
+    double OFFSET_LENGTH = 0.15;
     int missingFrames;
     vector<Eigen::Vector3d> positions;
     double time_stamp;
@@ -463,8 +459,9 @@ private:
 	    if (cameraData.new_data) {
 	    	observationParams.estimator->correct(cameraData.pose.translation());
 	 	cameraData.new_data = false;
-	        //cout << "global " << cameraData.pose.translation().transpose() << endl;		
-	        //positions.push_back(cameraData.pose.translation());
+	
+	        //cout << cameraData.pose.translation().transpose() << endl;		
+	        positions.push_back(cameraData.pose.translation());
 		//cout << positions.size() << endl;
 		if (positions.size() > observationWindow) {
 			auto res = observationParams.estimator->get_state();
@@ -474,7 +471,7 @@ private:
 		        preVisualServoingParams.P = res.second;
 			delete observationParams.estimator;
 			observationParams.estimator = nullptr;
-			cout << "velocity: " << res.first.tail(3).transpose() << endl;
+			cout << "position " << res.first.head(3).transpose() << endl << "velocity: " << res.first.tail(3).transpose() << endl;
 			startApproachPointComputationPhase();
 		}
 	    }
@@ -484,27 +481,9 @@ private:
             log_pp_ << res.first.head(3).transpose() << " " << res.second.norm() << endl;
             log_vel_ << res.first.tail(3).transpose() << endl;
             }
-            /*
-	    if (cameraData.newData) {
-	    	observationParams.estimator->predict(time_stamp);
-	   	auto res = observationParams.estimator->get_state();
-	   	log_rp_ << cameraData.pose.translation().transpose() << endl;
-	   	log_pp_ << res.first.transpose() << endl;
-	    	log_vel_ << res.second.transpose() << endl;
-
-	    	if (positions.size() > observationWindow) {    
-                	log_ << time() << " started fit " << time_stamp<< endl; 
-			pair<Eigen::Vector3d, Eigen::Vector3d> result = fitLine(positions, time_stamp - observationParams.start_time);
-                	log_ << time() << " started obs: " << observationParams.start_time << " ended " << time_stamp<< endl;  
-			approachPointComputingParams = { time_stamp,  result.first, result.second, cameraData.pose.rotation() };
-			startApproachPointComputationPhase();
-            	}
-	    }
-	  */
         } else {
             //handleMissingFrame();
         }
-	log_ << time() << " finished observing " << endl;
         return maintain_base_pos();
     }
 
@@ -779,8 +758,8 @@ private:
     	log_  << time() << " waiting" << endl;
 	if (apResult.finished.load()) {
 	    log_ << endl << time() << " completed computing" << endl;
-            std::lock_guard<std::mutex> lock(apResult.apResultMutex);		
-            startApproachPhase(apResult.q_config, apResult.exe_time);
+            std::lock_guard<std::mutex> lock(apResult.apResultMutex);
+	    startApproachPhase(apResult.q_config, apResult.exe_time);
 	} 
         return maintain_base_pos();
     }
@@ -819,8 +798,10 @@ private:
 	    cout << "cur time: " <<  time_stamp << " " << approachParams.start_time + approachParams.exe_time << endl;   
 	    Eigen::Matrix4d T_ee_o(Eigen::Matrix4d::Map(robot_state.O_T_EE.data()));
 	    cout <<"ee pose: " << T_ee_o(0,3) << " " << T_ee_o(1,3) << " " << T_ee_o(2,3) << endl;
-	    //throw runtime_error("approached");
-            return startVisualServoing();
+           // throw runtime_error("approached");
+
+	    
+	    return startVisualServoing();
         }
     }
 
@@ -914,6 +895,7 @@ private:
 
                                 
 				Eigen::VectorXd new_kf_state = preVisualServoingParams.state;
+				cout << "new state" << new_kf_state.transpose() << endl;
 				new_kf_state.head(3) = cameraData.pose.translation();
 
 				MovementEstimator* estimator = new MovementEstimator(new_kf_state, time_stamp, preVisualServoingParams.P);
@@ -1090,7 +1072,7 @@ int main(int argc, char ** argv) {
     franka::RobotState initial_state = robot.readOnce();
     string mode = argv[2];
 
-    StateController controller(model, 600, 90);
+    StateController controller(model, 600, 120);
     
     rs2::pipeline pipe;
     rs2::config cfg;
@@ -1120,7 +1102,7 @@ int main(int argc, char ** argv) {
     cout <<O_ee_0 << endl;
  
     controller.q_base = q_init;
-    cout << q_init.transpose() << endl;
+    cin.ignore(); 
     auto control_callback = [&](const franka::RobotState& robot_state,
                                       franka::Duration period) -> franka::Torques {
         time += period.toSec();
