@@ -13,7 +13,7 @@ find_package(cppzmq REQUIRED)
 
 # Find OpenCV package
 find_package(OpenCV REQUIRED)
-
+find_package(realsense2 REQUIRED)
 find_package(Eigen3 3.3 REQUIRED NO_MODULE)
 
 # Add your program's executable
@@ -23,5 +23,5 @@ add_executable(client main.cpp)
 include_directories(${OpenCV_INCLUDE_DIRS} ${EIGEN3_INCLUDE_DIRS})
 
 # Link libraries to your executable
-target_link_libraries(client cppzmq ${OpenCV_LIBS})
+target_link_libraries(client cppzmq ${OpenCV_LIBS} realsense2::realsense2)
 
