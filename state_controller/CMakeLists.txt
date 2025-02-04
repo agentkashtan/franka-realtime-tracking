@@ -11,11 +11,13 @@ find_package(OpenCV REQUIRED aruco)
 find_package(Franka REQUIRED)
 find_package(Eigen3 REQUIRED)
 find_package(realsense2 REQUIRED)
+find_package(cppzmq REQUIRED)
+
 
 
 add_executable(state_controller state_controller.cpp kalman/kalman.cpp) 
 target_include_directories(state_controller PRIVATE ${CMAKE_SOURCE_DIR}/kalman)
 
 
-target_link_libraries(state_controller PRIVATE ${OpenCV_LIBS} opencv_highgui pinocchio::pinocchio Eigen3::Eigen Franka::Franka realsense2::realsense2)
+target_link_libraries(state_controller PRIVATE cppzmq ${OpenCV_LIBS} opencv_highgui pinocchio::pinocchio Eigen3::Eigen Franka::Franka realsense2::realsense2)
  
