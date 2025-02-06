@@ -1,8 +1,8 @@
 #!/bin/bash
 set -v
 set -e
-export CMAKE_PREFIX_PATH=$HOME/lib:$CMAKE_PREFIX_PATH
-export LD_LIBRARY_PATH=$HOME/lib:$HOME/lib/lib:$LD_LIBRARY_PATH
+export CMAKE_PREFIX_PATH=$HOME/lib:$HOME/cppzmq/build:$CMAKE_PREFIX_PATH
+export LD_LIBRARY_PATH=$HOME/lib:$HOME/lib/lib:/home/robohub/libzmq/build/lib:$LD_LIBRARY_PATH
 
 cd
 
@@ -77,4 +77,5 @@ sudo apt-get install libopenexr-dev
 SCRIPT_DIR=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
 echo  ${SCRIPT_DIR}
 cp ${SCRIPT_DIR}/visual_servoing/franka_ik_He.hpp $HOME/lib/include
+/home/robohub/lib:/home/robohub/lib/lib::/home/robohub/libzmq/build/lib
 

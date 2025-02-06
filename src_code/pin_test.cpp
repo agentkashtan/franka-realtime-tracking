@@ -357,6 +357,9 @@ int main(int argc, char ** argv)
     q_sim.head(7) = q_test_init;
     Eigen::VectorXd q_prob(7);
     q_prob << 1.75766, -1.18572,  -1.6834 ,-2.30987, -1.34919,  1.90709,    -1.49;
+    Eigen::VectorXd q_base(7);
+    
+    q_base << -0.420854,  0.181446, -0.535689,  -1.50956,  0.301637 ,  1.80662, -0.191084;
 
     forwardKinematics(sim_model, sim_data, q_sim, q_dot_sim);
     updateFramePlacements(sim_model, sim_data);
@@ -382,8 +385,6 @@ int main(int argc, char ** argv)
     franka::RobotState initial_state = robot.readOnce(); 
     cout << argv[2] << endl;
      
-
-
     Eigen::VectorXd q_test_speed_s(7);
     q_test_speed_s <<   -1.11004,   0.168485,   0.352721,   -1.78625, 0.00336914,    2.10711, -0.0505298;
 
@@ -395,7 +396,9 @@ int main(int argc, char ** argv)
 
         string mode = argv[2];
  Eigen::Map<const Eigen::Matrix<double, 7, 1>> q_init(initial_state.q.data());
-
+     cout << "init pos " << q_init.transpose() << endl;
+     
+ 
      Eigen::Vector3d move_to;
              Eigen::VectorXd q_test;
      
@@ -416,7 +419,7 @@ int main(int argc, char ** argv)
         Eigen::VectorXd tau_cmd = Eigen::VectorXd::Zero(7);
 
 	if (mode == "true") { 
-		tau_cmd = first_phase_controller(time, q_init, q_test_speed_s, q, dq, mass); 
+		tau_cmd = first_phase_controller(time, q_init, q_base, q, dq, mass); 
 	} else {
 	 tau_cmd = first_phase_controller(time, q_init, q_test_speed_e, q, dq, mass);
 

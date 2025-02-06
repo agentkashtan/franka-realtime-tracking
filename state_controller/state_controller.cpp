@@ -24,6 +24,7 @@
 #include <cmath>
 
 #include "kalman.h"
+#include "trajectory_generator.h"
 
 #include <franka/duration.h>
 #include <franka/exception.h>
@@ -49,6 +50,7 @@ using namespace std;
 
 float markerLength = 0.07;
 cv::Mat cameraMatrix(3,3, CV_32FC1), distCoeffs;
+
 
 int frame_number = 0;
 cv::aruco::Dictionary dictionary = cv::aruco::getPredefinedDictionary(cv::aruco::DICT_5X5_50);
@@ -107,6 +109,8 @@ APResult apResult;
 
 enum class State {
     Idle,
+    Registration,
+    DoNothing,
     Observing,
     ComputingApproachPoint,
     Approaching,
@@ -117,6 +121,12 @@ enum class State {
 
 struct IdleParams {
     double start_time;
+};
+
+struct RegParams {
+    double start_time;
+    Eigen::Vector3d init_position;
+    Eigen::Matrix3d init_orientation;
 };
 
 struct ObservationParams {
@@ -300,6 +310,7 @@ public:
 	    start = std::chrono::high_resolution_clock::now();
 	    Kp.diagonal() << 200, 200, 200, 200, 200, 200,200;
             Kd.diagonal() << 20, 20, 20, 20, 20, 20, 8;
+            CONVEYOR_BELT_SPEED << -0.1, 0.0, 0.0;
           }
 
     string time(){
@@ -322,9 +333,12 @@ public:
         Eigen::Map<const Eigen::Matrix<double, 7, 1>> q(robot_state.q.data());
         switch (state) {
             case State::Idle:
-		return processIdle();
-                break;
-            case State::Observing:
+		        return processIdle();
+            case State::Registration:
+                return processRegistration();
+            case State::DoNothing:
+                return maintain_base_pos();   
+            /*case State::Observing:
 		log_ << time() << " observing " << endl;
 		return processObserving();
                 break;
@@ -340,7 +354,7 @@ public:
                 break;
             case State::VisualServoing:
                 return processVisualServoing();
-                break;
+                break;*/
         }
     }
     Eigen::Matrix<double, 7, 1> q_base;
@@ -361,6 +375,7 @@ private:
 
     std::chrono::high_resolution_clock::time_point start;
     double OFFSET_LENGTH = 0.15;
+    Eigen::Vector3d CONVEYOR_BELT_SPEED;
     int missingFrames;
     vector<Eigen::Vector3d> positions;
     double time_stamp;
@@ -369,6 +384,8 @@ private:
     Eigen::DiagonalMatrix<double, 7> Kp;
     Eigen::DiagonalMatrix<double, 7> Kd;
     IdleParams idleParams;
+    RegParams regParams;
+
     ObservationParams observationParams;
     ApproachParams approachParams;
     VisualServoingParams visualServoingParams;
@@ -381,36 +398,100 @@ private:
     } 
 
     void convert_to_global(CameraData& data) {
-    	if (!data.global_frame) {
-	   data.global_frame = true;
-	   Eigen::Isometry3d T_ee_o(Eigen::Matrix4d::Map(robot_state.O_T_EE.data()));
-	   data.pose = T_ee_o * data.pose;
-	}    
+        if (!data.global_frame) {
+	        data.global_frame = true;
+	        Eigen::Isometry3d T_ee_o(Eigen::Matrix4d::Map(robot_state.O_T_EE.data()));
+	        data.pose = T_ee_o * data.pose;
+	    }    
     }
     
     array<double, 7> maintain_base_pos() {
-
-        array<double, 7> coriolis_array = model.coriolis(robot_state);
-
-        Eigen::Map<const Eigen::Matrix<double, 7, 1>> coriolis(coriolis_array.data());
+        array<double, 7> coriolisArray = model.coriolis(robot_state);
+        Eigen::Map<const Eigen::Matrix<double, 7, 1>> coriolis(coriolisArray.data());
         Eigen::Map<const Eigen::Matrix<double, 7, 1>> q(robot_state.q.data());
         Eigen::Map<const Eigen::Matrix<double, 7, 1>> dq(robot_state.dq.data());
+	    Eigen::VectorXd tauCmd =  Kp * ( q_base - q) + Kd * (- dq) + coriolis;
+        std::array<double, 7> tauDArray{};
+        Eigen::VectorXd::Map(&tauDArray[0], 7) = tauCmd;
+        return tauDArray;
+    }
 
-	Eigen::VectorXd tau_cmd =  Kp * ( q_base - q) + Kd * (- dq) + coriolis;
-        std::array<double, 7> tau_d_array{};
-        Eigen::VectorXd::Map(&tau_d_array[0], 7) = tau_cmd;
-        return tau_d_array;
+    Eigen::VectorXd cartesianController(Eigen::VectorXd q, Eigen::VectorXd dq, Eigen::Vector3d position_d, Eigen::Matrix3d orientation_d, Eigen::Vector3d obj_velocity, Eigen::Matrix<double, 6, 7>jacobian, Eigen::Matrix4d T_ee_0) {
+        Eigen::MatrixXd w = Eigen::MatrixXd::Identity(7, 7);
+        Eigen::DiagonalMatrix<double, 6> Kp_ts(300, 300, 300, 30, 30, 30);
+        Eigen::DiagonalMatrix<double, 7> Kd(20, 20, 20, 20, 20, 20, 8);
+
+        Eigen::Vector3d error_pos = position_d - T_ee_0.topRightCorner<3,1>();
+
+        Eigen::Matrix3d r_diff = orientation_d * T_ee_0.topLeftCorner<3,3>().transpose();
+        Eigen::AngleAxisd angle_axis(r_diff);
+        Eigen::Vector3d error_orient = angle_axis.axis() * angle_axis.angle();
+
+        Eigen::VectorXd error_p(6);
+        error_p.head(3) = error_pos;
+        error_p.tail(3) = error_orient;
+
+        Eigen::VectorXd q_dot_des_ts = Eigen::VectorXd::Zero(6);
+        q_dot_des_ts.head(3) = obj_velocity;
+        
+        Eigen::VectorXd q_dot_des_js = w.inverse() * jacobian.transpose() * (jacobian * w.inverse() * jacobian.transpose()).inverse() * q_dot_des_ts;
+
+        Eigen::VectorXd tau(7);
+        tau = jacobian.transpose() * Kp_ts * error_p + Kd * (q_dot_des_js - dq);
+
+        return tau;
     }
 
     array<double, 7> processIdle() {
-	std::lock_guard<std::mutex> lock(cameraDataMutex);
-	convert_to_global(cameraData);
-        if (cameraData.detected) {
-            cout << "pose data in cntr: " << cameraData.pose.translation().transpose() << endl;
-            //startObserving(cameraData.pose.translation());
+	    std::lock_guard<std::mutex> lock(cameraDataMutex);
+        cout << cameraData.new_data << endl;
+        if (cameraData.new_data && cameraData.detected) {
+            cameraData.new_data = false;
+            cout << cameraData.pose.translation().transpose() << endl;
+            Eigen::Matrix4d T_EE_0(Eigen::Matrix4d::Map(robot_state.O_T_EE.data()));
+            regParams = { time_stamp, T_EE_0.topRightCorner<3,1>(), T_EE_0.topLeftCorner<3,3>() };
+            cout <<"transfer to reg" << endl;
+            state = State::Registration;
         }
-	return maintain_base_pos();
+	    return maintain_base_pos();
     }
+    
+    array<double, 7> processRegistration() {
+        std::lock_guard<std::mutex> lock(cameraDataMutex);
+        if (!cameraData.new_data) {          
+            array<double, 7> coriolisArray = model.coriolis(robot_state);
+            array<double, 42> jacobian_array = model.zeroJacobian(franka::Frame::kEndEffector, robot_state);
+            
+            Eigen::Map<const Eigen::Matrix<double, 7, 1>> coriolis(coriolisArray.data());
+            Eigen::Map<const Eigen::Matrix<double, 6, 7>> jacobian(jacobian_array.data());
+            Eigen::Map<const Eigen::Matrix<double, 7, 1>> q(robot_state.q.data());
+            Eigen::Map<const Eigen::Matrix<double, 7, 1>> dq(robot_state.dq.data());
+            Eigen::Matrix4d T_EE_0(Eigen::Matrix4d::Map(robot_state.O_T_EE.data()));
+            q_base = q;
+           
+            Eigen::VectorXd tauCmd;
+            tauCmd = cartesianController(q, dq, regParams.init_position + (time_stamp - regParams.start_time) * CONVEYOR_BELT_SPEED, regParams.init_orientation, CONVEYOR_BELT_SPEED, jacobian, T_EE_0);
+            tauCmd += coriolis;
+            std::array<double, 7> tau_d_array{};
+            Eigen::VectorXd::Map(&tau_d_array[0], 7) = tauCmd;
+            return tau_d_array;
+        } else {
+            cout << cameraData.pose.translation().transpose() << endl;
+            cout << regParams.init_position.transpose() << endl;
+            cout << (regParams.init_position + (time_stamp - regParams.start_time) * CONVEYOR_BELT_SPEED).transpose() << endl;
+            Eigen::Matrix4d T_EE_0(Eigen::Matrix4d::Map(robot_state.O_T_EE.data()));
+
+            cout <<  T_EE_0.topRightCorner<3,1>().transpose() << endl; 
+            Eigen::Map<const Eigen::Matrix<double, 7, 1>> q(robot_state.q.data());
+            q_base = q;
+            state = State::DoNothing;
+        }
+        return maintain_base_pos();
+   }
+   
+
+
+
 
     void handleMissingFrame() {
         missingFrames++;
@@ -421,15 +502,15 @@ private:
     }
 
     //Handle observing state
-
+    /*
     void startObserving(const Eigen::Vector3d& initialPosition) {
         state = State::Observing;
         observationParams.start_time = time_stamp;
-	Eigen::MatrixXd temp_p = Eigen::MatrixXd::Identity(6, 6) * 2;
-	temp_p.topLeftCorner(3, 3) = Eigen::MatrixXd::Identity(3, 3) * 2;
-	Eigen::VectorXd init_state = Eigen::VectorXd::Zero(6);
-	init_state.head(3) = initialPosition;
-	observationParams.estimator = new MovementEstimator(init_state, time_stamp, temp_p);
+	    Eigen::MatrixXd temp_p = Eigen::MatrixXd::Identity(6, 6) * 2;
+	    temp_p.topLeftCorner(3, 3) = Eigen::MatrixXd::Identity(3, 3) * 2;
+	    Eigen::VectorXd init_state = Eigen::VectorXd::Zero(6);
+	    init_state.head(3) = initialPosition;
+	    observationParams.estimator = new MovementEstimator(init_state, time_stamp, temp_p);
         cameraData.new_data = false;	
         positions.clear();
         positions.push_back(initialPosition);
@@ -795,46 +876,7 @@ private:
 
     //Handle visual servoing state
 
-    Eigen::VectorXd visual_servoing_controller(Eigen::VectorXd q, Eigen::VectorXd q_dot, Eigen::Isometry3d pose, Eigen::Vector3d obj_velocity, Eigen::Matrix<double, 6, 7>jacobian, Eigen::Matrix4d T_ee_0) {
-        Eigen::MatrixXd w = Eigen::MatrixXd::Identity(7, 7);
-        Eigen::DiagonalMatrix<double, 6> Kp_ts(300, 300, 300, 30, 30, 30);
-        Eigen::DiagonalMatrix<double, 7> Kd(20, 20, 20, 20, 20, 20, 8);
-        
-        Eigen::Vector3d offset;
-        offset << pose.linear().col(2) * OFFSET_LENGTH;
-	//disabled smart offset for now
-        Eigen::Vector3d obj_position = pose.translation() + Eigen::Vector3d(0, 0, 0.2);// offset;
-        
-	Eigen::Vector3d error_pos = obj_position - T_ee_0.topRightCorner<3,1>();
-        
-        Eigen::Matrix3d r_desired = Eigen::Matrix3d::Identity();
-        r_desired.col(0) << pose.linear().col(0);
-        r_desired.col(1) << - pose.linear().col(1);
-        r_desired.col(2) << - pose.linear().col(2);
-
-	
-	Eigen::Matrix3d r_diff = r_desired * T_ee_0.topLeftCorner<3,3>().transpose();
-        Eigen::AngleAxisd angle_axis(r_diff);
-	
-
-        Eigen::Vector3d error_orient = angle_axis.axis() * angle_axis.angle();
-
-        Eigen::VectorXd error_p(6);
-        error_p.head(3) = error_pos;
-        error_p.tail(3) = error_orient;
-        log_ik_ << time() <<  " from VS " << error_p.transpose() << endl;
-        Eigen::VectorXd q_dot_des_ts = Eigen::VectorXd::Zero(6);
-        q_dot_des_ts.head(3) = obj_velocity;
-        Eigen::VectorXd q_dot_des_js = w.inverse() * jacobian.transpose() * (jacobian * w.inverse() * jacobian.transpose()).inverse() * q_dot_des_ts;
-
-        Eigen::VectorXd tau(7);
-        tau = jacobian.transpose() * Kp_ts * error_p + Kd * (q_dot_des_js - q_dot);
-
-	return tau;
-    }
-
-
-
+    //Eigen::VectorXd visual_servoing_controller(Eigen::VectorXd q, Eigen::VectorXd q_dot, Eigen::Isometry3d pose, Eigen::Vector3d obj_velocity, Eigen::Matrix<double, 6, 7>jacobian, Eigen::Matrix4d T_ee_0)
 
     array<double, 7> startVisualServoing() {
         state = State::VisualServoing;
@@ -951,98 +993,29 @@ log_ik_ << "typost' " << visualServoingParams.desired_position << " " << vs_pose
 
 
 
-/*
-
-
-	if (cameraData.detected) {
- 
-            Eigen::Map<const Eigen::Matrix<double, 7, 1>> coriolis(coriolis_array.data());
-            Eigen::Map<const Eigen::Matrix<double, 6, 7>> jacobian(jacobian_array.data());
-            Eigen::Map<const Eigen::Matrix<double, 7, 1>> q(robot_state.q.data());
-            Eigen::Map<const Eigen::Matrix<double, 7, 1>> dq(robot_state.dq.data());
-            Eigen::Matrix4d T_ee_0(Eigen::Matrix4d::Map(robot_state.O_T_EE.data()));
-            //
-	    q_base = q;
-	    //
-            Eigen::VectorXd tau_cmd = Eigen::VectorXd::Zero(7);
-            //
-
-            Eigen::Vector3d velocity = approachPointComputingParams.velocity;//Eigen::Vector3d::Zero();
-            //                        approachPointComputingParams = { time_stamp, res.first.head(3), res.first.tail(3), cameraData.pose.rotation() };
-            Eigen::Isometry3d obj_pose = cameraData.pose;
-	   
-            tau_cmd = visual_servoing_controller(q, dq, cameraData.pose, velocity, jacobian, T_ee_0); // get velocity somewhere ?
-	    tau_cmd += coriolis;
-
-            std::array<double, 7> tau_d_array{};
-	    Eigen::VectorXd::Map(&tau_d_array[0], 7) = tau_cmd;
-                     //throw runtime_error("stopped vs");
-
-	    return tau_d_array;
-
-        } else {
-            //handleMissingFrame();
-	    cout << "frame not found" << endl;
-            return maintain_base_pos();//visualServoingParams.tau_prev;
-        }*/
-
-    }
-
-
     array<double, 7> processErrorRecovery() {
         cout << "recovery";
         throw runtime_error("Entered recovery.");
         return ZERO_TORQUES;
 
     }
-
-    
-
-    Eigen::Vector3d calculateCentroid(const std::vector<Eigen::Vector3d>& points) {
-        Eigen::Vector3d centroid(0, 0, 0);
-        for (const auto& point : points) {
-            centroid += point;
-        }
-        centroid /= points.size();
-        return centroid;
-    }
-
-    Eigen::Matrix3d computeCovarianceMatrix(const std::vector<Eigen::Vector3d>& points, const Eigen::Vector3d& centroid) {
-        Eigen::Matrix3d covariance = Eigen::Matrix3d::Zero();
-        for (const auto& point : points) {
-            Eigen::Vector3d centered = point - centroid;
-            covariance += centered * centered.transpose();
-        }
-        covariance /= points.size();
-        return covariance;
-    }
-
-    pair<Eigen::Vector3d, Eigen::Vector3d> fitLine(const std::vector<Eigen::Vector3d>& points, double time) {
-        Eigen::Vector3d centroid = calculateCentroid(points);
-
-        Eigen::Matrix3d covarianceMatrix = computeCovarianceMatrix(points, centroid);
-
-
-        Eigen::SelfAdjointEigenSolver<Eigen::Matrix3d> eigenSolver(covarianceMatrix);
-        Eigen::Vector3d direction = eigenSolver.eigenvectors().col(2);
-
-        double t_start = (points[0] - centroid).dot(direction) / direction.dot(direction);
-        double t_end = (points.back() - centroid).dot(direction) / direction.dot(direction);
-        Eigen::Vector3d p_start = centroid + t_start * direction;
-        Eigen::Vector3d p_end = centroid + t_end * direction;
-
-        std::cout << "Centroid of the fitted line: " << centroid.transpose() << std::endl;
-        std::cout << "Direction of the fitted line: " << direction.transpose() << std::endl;
-        std::cout << "Line equation: p(t) = [" << centroid.transpose() << "] + t * [" << direction.transpose() << "]" << std::endl;
-        std::cout << "Starting point: " << p_start.transpose() << std::endl;
-        return {p_end, (p_end - p_start) / time};
-    }
+*/
 };
 
 int main(int argc, char ** argv) {
     using namespace pinocchio;
-    
+    /*    
+    generate_joint_waypoint(
+        100,
+        4.0,
+       	Eigen::Vector3d(0.5, -0.5, 0.0),
+        Eigen::Vector3d(0.0, 0.1, 0.0),
+        Eigen::Vector3d(0.5, 0.0, 0.4),
+        Eigen::Vector3d(0.0, 0.0, 0.15)
+    );
+    */
     // Robot set up
+
     if(!getenv("URDF"))throw std::runtime_error("no URDF env");
     const string urdf_filename = getenv("URDF");
     Eigen::VectorXd q_test_init(7);
@@ -1130,10 +1103,8 @@ int main(int argc, char ** argv) {
     Eigen::Map<const Eigen::Matrix<double, 7, 1>> q_init(initial_state.q.data());
     
     Eigen::Matrix4d O_ee_0(Eigen::Matrix4d::Map(initial_state.O_T_EE.data()));
-    cout <<O_ee_0 << endl;
  
-    controller.q_base = q_init;
-    cin.ignore(); 
+    controller.q_base = q_init; 
     auto control_callback = [&](const franka::RobotState& robot_state,
                                       franka::Duration period) -> franka::Torques {
         time += period.toSec();
