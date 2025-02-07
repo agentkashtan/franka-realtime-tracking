@@ -6,8 +6,52 @@
  
 using namespace casadi;
  
-//------------------------------------------------------------------------------
- 
+//Compute time for EE to intersect with object, when moving in a straight line with exceeding maxCartesianVelocity. If -1, there is no valid time
+double feasibleMinTime(Eigen::Vector3d  objectPosition, Eigen::Vector3d objectVelocity, Eigen::Vector3d robotPosition, double maxCartesianVelocity) {
+    Eigen::Vector3d delta = objectPosition - robotPosition;
+    double C = delta.dot(delta);
+    double B = 2 * delta.dot(objectVelocity);
+    double A = objectVelocity.dot(objectVelocity) - std::pow(maxCartesianVelocity, 2);
+    double e = 1e-12;
+    if (std::abs(A) < e) {
+        if (std::abs(B) < e) {
+            return -1;
+        }
+        if (B > 0) {
+            double t = - C / B;
+            if (t >= 0) return t;
+            return -1;
+        } else {
+            return std::max(0.0, - C / B);
+        }
+    }
+    double D = std::pow(B, 2) - 4 * A * C;
+    if (D < 0) {
+        if (A < 0) return 0;
+        return -1;
+    } else {
+        double sqrtD = std::sqrt(D);
+        double x1 = (- B - sqrtD) / (2 * A);
+        double x2 = (- B + sqrtD) / (2 * A);
+        if (x1 > x2) std::swap(x1, x2);
+        if (A > 0) {
+            if (x2 < 0) return -1;
+            return std::max(0.0, x1);
+        } else { 
+            if (x2 < 0) {
+                if (C <= 0) return 0;
+                return -1;
+            }
+            if (x1 < 0) return x2;
+            if (C <= 0) return 0;
+            return -1;
+        }
+    }
+}
+
+
+
+
 /// DH link transform
 SX link_transform(double a, double alpha, double d, const SX &theta)
 {
@@ -99,44 +143,28 @@ std::pair<SX,SX> forward_kinematics(const SX &q)
 std::vector<Eigen::VectorXd> generate_joint_waypoint(
         int N,
         double total_time,
-        Eigen::Vector3d obj_init_pos,
+        Eigen::Isometry3d obj_init_pose,
         Eigen::Vector3d obj_vel,
-        Eigen::Vector3d robot_pos_init,
+        Eigen::VectorXd robot_joint_config,
         Eigen::Vector3d offset
         )
 { 
     // -------------------------------------------------------------------------
     // 2. Compute initial orientation
- 
-    // z = obj_init_pos - robot_pos_init
-    Eigen::Vector3d z = obj_init_pos - robot_pos_init;
+    int ndof = 7;
 
-    z = z / z.norm();
-    // x = [z[2], 0, -z[0]]
-    Eigen::Vector3d x(z(2), 0.0, -z(0));
- 
-    // y = cross(z, x)
-    Eigen::Vector3d y = z.cross(x);
- 
-    // orient_init = [x | y | z] as columns => a 3x3
-    DM orient_init = DM::zeros(3,3);
-    for (int i = 0; i < 3; i ++) {
-        orient_init(0, i) = x(i);
-        orient_init(1, i) = y(i);
-        orient_init(2, i) = z(i);
-    }
+    Eigen::Vector3d obj_init_pos = obj_init_pose.translation();
+    
+    SX robotJointPositionSX = SX::zeros(7);
+    for (int i = 0; i < ndof; i ++) robotJointPositionSX(i) = robot_joint_config(i);
 
-  
-    // -------------------------------------------------------------------------
-    // 3. Compute minimal feasible time (assume function is defined):
-    // feasible_min_time(obj_init_pos, robot_pos_init, obj_vel, 0.1);
- 
     // -------------------------------------------------------------------------
     // 4. Compute final pose
     Eigen::Vector3d robot_pos_fin = obj_init_pos + obj_vel * total_time + offset;
  
     // We'll define some axis to orient the end-effector at final
     // (From your snippet: x_fin = [0,1,0], z_fin = - offset / ||offset||, etc.)
+    /*
     Eigen::Vector3d x_fin(0.0, 1.0, 0.0);
  
     // z_fin = -offset / norm(offset)
@@ -151,12 +179,12 @@ std::vector<Eigen::VectorXd> generate_joint_waypoint(
         orient_fin(1, i) = y_fin(i);
         orient_fin(2, i) = z_fin(i);
     }
+    */	
 
-    int ndof = 7; 
     double delta_t = total_time / (N - 1);
  
     // Create CasADi decision variable: q_sym in R^(7*N)
-    SX q_sym = SX::sym("q", ndof * N);
+    SX q_sym = SX::sym("q", ndof * N * 2);
  
     // Helper to extract q_i (7x1) from the flattened q_sym
     auto get_q = [&](int i)
@@ -167,6 +195,16 @@ std::vector<Eigen::VectorXd> generate_joint_waypoint(
         }
         return out;
     };
+
+    auto get_dq = [&](int i)
+    {
+        SX out = SX::zeros(ndof);
+        for (int j = 0; j < ndof; ++j) {
+            out(j) = q_sym(N * ndof + i*ndof + j);
+        }
+        return out;
+    };
+
  
     // We define some weights
     double w_pos_terminal = 3.0;
@@ -179,7 +217,7 @@ std::vector<Eigen::VectorXd> generate_joint_waypoint(
     for (int i = 0; i < N; i ++){
         intermediate_obj_pos[i] = obj_init_pos + i * delta_t * obj_vel;
     }
- 
+    std::cout << "obj" << intermediate_obj_pos[19].transpose() << std::endl; 
     // Build objective
     SX obj = SX::zeros(1);
  
@@ -188,31 +226,32 @@ std::vector<Eigen::VectorXd> generate_joint_waypoint(
     std::vector<double> lbg_list, ubg_list;
  
     // Joint limits
-    std::vector<double> upper_limits = {2.8973,  1.7628,  2.8973, -0.0698, 2.8973, 3.7525, 2.8973};
-    std::vector<double> lower_limits = {-2.8973, -1.7628, -2.8973, -3.0718, -2.8973, -0.0175, -2.8973};
-    std::cout << " ++ ";	
+    std::vector<double> upperJointsLimits = {2.8973,  1.7628,  2.8973, -0.0698, 2.8973, 3.7525, 2.8973};
+    std::vector<double> lowerJointsLimits = {-2.8973, -1.7628, -2.8973, -3.0718, -2.8973, -0.0175, -2.8973};
+    std::vector<double> upperVelocityLimits = {2, 2, 2, 2, 2, 2, 2};
+    std::vector<double> lowerVelocityLimits = {-2, -2, -2, -2, -2, -2, -2};
+
+    
+    
     for (int i=0; i<N; i++)
     {
         SX q_i = get_q(i);
+        SX dq_i = get_dq(i);
         auto fwd_ee = forward_kinematics(q_i);
         SX pos_ee = fwd_ee.first;
         SX R_ee   = fwd_ee.second;
  
         if (i == 0)
         {
-            // initial position error
-            SX pos_err = pos_ee - vertcat(SX(robot_pos_init(0)), SX(robot_pos_init(1)), SX(robot_pos_init(2)));
-            obj += w_pos_terminal * dot(pos_err, pos_err);
- 
-            // initial orientation error
-            SX ori_err = orientationErrorAngleAxis(R_ee, orient_init);
-            obj += w_ori_terminal * dot(ori_err, ori_err);
+            SX err = q_i - robotJointPositionSX;
+            obj += 10 * dot(err, err);
+            obj += 1.5 * dot(dq_i, dq_i);
         }
         else if (i == N-1)
         {
             // final position error
             SX pos_err = pos_ee - vertcat(SX(robot_pos_fin(0)), SX(robot_pos_fin(1)), SX(robot_pos_fin(2)));
-            obj += w_pos_terminal * dot(pos_err, pos_err);
+            obj += 10* dot(pos_err, pos_err);
  
             // Instead of orientationErrorAngleAxis(R_ee, orient_fin), you used
             // the direct alignment with the direction to the object:
@@ -221,7 +260,8 @@ std::vector<Eigen::VectorXd> generate_joint_waypoint(
             SX z_unit = z_vec / z_norm_ee;
  
             SX err = 1.0 - dot(R_ee(Slice(),2), z_unit);  // 3rd column is 'z' axis
-            obj += w_pos_terminal * dot(err, err);
+            obj += 2 * dot(err, err);
+            obj += 1.5 * dot(dq_i, dq_i);
         }
         else
         {
@@ -232,14 +272,20 @@ std::vector<Eigen::VectorXd> generate_joint_waypoint(
  
             SX err = 1.0 - dot(R_ee(Slice(),2), z_unit);
             obj += w_ori * dot(err, err);
+            obj += 0.2 * dot(dq_i, dq_i);
+
         }
  
         // Smoothness
         if (i > 0)
         {
-            SX q_prev = get_q(i-1);
-            SX dq = q_i - q_prev;
-            obj += w_smooth * dot(dq, dq);
+            SX q_prev = get_q(i - 1);
+            SX dq_prev = get_dq(i - 1);
+            SX error = q_i - q_prev - dq_prev * delta_t;
+            obj += 5 * dot(error, error);
+            
+            SX ddq = dq_i - dq_prev;
+            obj += 0.2 * dot(ddq, ddq);
         }
     }
  
@@ -265,20 +311,31 @@ std::vector<Eigen::VectorXd> generate_joint_waypoint(
     // -------------------------------------------------------------------------
     // 7. Build bounds for decision variables
     std::vector<double> lbq, ubq;
-    lbq.reserve(N*ndof);
-    ubq.reserve(N*ndof);
- 
+    lbq.reserve(2*N*ndof);
+    ubq.reserve(2*N*ndof);
     for (int i=0; i<N; i++){
         for (int j=0; j<ndof; j++){
-            lbq.push_back(lower_limits[j]);
-            ubq.push_back(upper_limits[j]);
+            lbq.push_back(lowerJointsLimits[j]);
+            ubq.push_back(upperJointsLimits[j]);
         }
     }
+    for (int i = 0; i < N; i ++){
+        for (int j=0; j<ndof; j++){
+            lbq.push_back(lowerVelocityLimits[j]);
+            ubq.push_back(upperVelocityLimits[j]);
+        }
+    }
+
+
  
     // -------------------------------------------------------------------------
     // 8. Initial guess
-    std::vector<double> x0(N*ndof, 0.2);  // same as your Python x0=...
- 
+    std::vector<double> x0(2 * N * ndof, 0.2);
+    /*
+    for (int i = 0; i < N; i ++) x0.insert(x0.end(), robot_joint_config.data(), robot_joint_config.data() + robot_joint_config.size());
+    std::vector<double> temp(N * ndof, 0);
+    x0.insert(x0.end(), temp.begin(), temp.end());
+    */
     // -------------------------------------------------------------------------
     // 9. Build the NLP solver
     //    nlp  = {'x': q_sym, 'f': obj, 'g': g}
@@ -287,8 +344,12 @@ std::vector<Eigen::VectorXd> generate_joint_waypoint(
     nlp["x"] = q_sym;
     nlp["f"] = obj;
     nlp["g"] = g;
- 
-    Function solver = nlpsol("solver", "ipopt", nlp);
+    Dict opts_dict=Dict();
+    opts_dict["ipopt.print_level"] = 0;
+    opts_dict["ipopt.sb"] = "yes";
+    opts_dict["print_time"] = 0;
+
+    Function solver = nlpsol("solver", "ipopt", nlp); //opts_dict);
  
     // -------------------------------------------------------------------------
     // 10. Solve
@@ -314,8 +375,8 @@ std::vector<Eigen::VectorXd> generate_joint_waypoint(
         Eigen::Map<Eigen::VectorXd> vec(&q_opt[i * ndof], ndof);
         result[i] = vec;
     }
-    std::cout << "result ";
-    std::cout << result[0].transpose() << std::endl << result[N-2].transpose() ;
+    //std::cout << "result ";
+    //std::cout << result[0].transpose() << std::endl << result[N-2].transpose() ;
     return result;
 }
 

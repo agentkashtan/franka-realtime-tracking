@@ -8,7 +8,9 @@
 #include <cmath>
  
 using namespace casadi;
- 
+
+double feasibleMinTime(Eigen::Vector3d  objectPosition, Eigen::Vector3d objectVelocity, Eigen::Vector3d robotPosition, double maxCartesianVelocity);
+
 /// DH link transform
 SX link_transform(double a, double alpha, double d, const SX &theta);
  
@@ -25,12 +27,11 @@ std::pair<SX,SX> forward_kinematics(const SX &q);
 std::vector<Eigen::VectorXd> generate_joint_waypoint(
         int N,
         double total_time,
-        Eigen::Vector3d obj_init_pos,
+        Eigen::Isometry3d obj_init_pose,
         Eigen::Vector3d obj_vel,
-        Eigen::Vector3d robot_pos_init,
+        Eigen::VectorXd robot_joint_config,
         Eigen::Vector3d offset
         );
-
 
 #endif //  TRAJECTORY_GENERATOR_H
 
