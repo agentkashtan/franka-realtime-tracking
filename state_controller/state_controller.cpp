@@ -361,8 +361,13 @@ public:
             case State::DoNothing:
                 return maintain_base_pos(); 
             case State::ComputingApproachPoint:
+                log_ << time() << " Controller Comp"<<endl;
                 return processApproachPointComputationPhase();  
-            /*case State::Observing:
+            case State::Approaching:
+                log_ << time() << " Controller App"<<endl;
+                return processApproachPhase();
+
+                /*case State::Observing:
 		log_ << time() << " observing " << endl;
 		return processObserving();
                 break;
@@ -512,19 +517,17 @@ private:
     }
    
     thread computeApproachConfig_thread_; 
-    void computeApproachTrajectory(Eigen::Isometry3d objectPose)  {
+    void computeApproachTrajectory(int n, Eigen::Isometry3d objectPose, Eigen::Matrix4d T_EE_0, Eigen::VectorXd q)  {
         cout << "strated comp thread" << endl;
         try { 
             apResult.finished.store(false);
-            Eigen::Matrix4d T_EE_0(Eigen::Matrix4d::Map(robot_state.O_T_EE.data()));
-            Eigen::Map<const Eigen::Matrix<double, 7, 1>> q(robot_state.q.data());
-
-            auto start = chrono::high_resolution_clock::now();
-            double reachTime = feasibleMinTime(objectPose.translation(), CONVEYOR_BELT_SPEED, T_EE_0.topRightCorner<3,1>(), MAX_CARTESIAN_VELOCITY);
-            cout << "reachtime " << reachTime << endl;
-            cout << "obj " << objectPose.translation().transpose() << endl;
-            cout << "robor " << T_EE_0.topRightCorner<3,1>().transpose() << endl;
-
+            log_ << time() << " started computiotions" << endl;
+            auto startComp = chrono::high_resolution_clock::now();
+            double reachTime =  4.83118;//feasibleMinTime(objectPose.translation(), CONVEYOR_BELT_SPEED, T_EE_0.topRightCorner<3,1>(), MAX_CARTESIAN_VELOCITY);
+            //cout << "reachtime " << reachTime << endl;
+            //cout << "obj " << objectPose.translation().transpose() << endl;
+            //cout << "robor " << T_EE_0.topRightCorner<3,1>().transpose() << endl;
+            /*
             vector<Eigen::VectorXd> jointWaypoints = generate_joint_waypoint(
                     N, 
                     reachTime,
@@ -534,13 +537,25 @@ private:
                     OFFSET
                     );
             cout << "debug data"<< endl;
-
-            auto now = chrono::high_resolution_clock::now();
-            chrono::duration<double> computationTime = now - start;
-            reachTime -= computationTime.count();    
-                        cout << reachTime << endl << endl << objectPose.translation().transpose() << endl << endl << T_EE_0 << endl << endl << q.transpose()<< endl;
-
-            double intervalNumber = N - 1;
+            */
+            log_ << time() << " pregen" << endl;
+            Eigen::Isometry3d testobj;
+                testobj.translation() = Eigen::Vector3d(0.766897,  -0.522604, -0.0341329);
+                Eigen::VectorXd testconfig(7);
+                testconfig << -0.463119, 0.00117603 , -0.600473,   -1.75616 ,  0.199755  ,  1.83604 , -0.281126;
+                std::vector<Eigen::VectorXd>  jointWaypoints = generate_joint_waypoint(
+                20,
+                4.83118,
+                testobj,
+                Eigen::Vector3d(-0.1, 0.0, 0.0),
+                q,
+                Eigen::Vector3d(0.0, 0.0, 0.15)
+                );
+            log_ << time() << " postgen" << endl;
+            auto endComp = chrono::high_resolution_clock::now();
+            chrono::duration<double> computationTime = endComp - startComp;
+            //reachTime -= computationTime.count();    
+            double intervalNumber = n - 1;
             double deltaT = reachTime / intervalNumber;
             
             vector<Eigen::VectorXd> jointVelocities(N);
@@ -579,7 +594,8 @@ private:
                 }
                 spline[i] = localSpline;
             }
-                        
+            log_ << time() <<  " modyfing" <<endl;
+
             {
                 std::lock_guard<std::mutex> lock(apResult.apResultMutex);
                 apResult.reachTime = reachTime;
@@ -588,6 +604,7 @@ private:
             }
             
             apResult.finished.store(true);
+            log_ << time() <<  " computed" <<endl;
         } catch (exception const & ex ) {
             cerr << "compute_approach_point_mth catch ex: " << ex.what() << endl;
         }
@@ -597,15 +614,20 @@ private:
     void startApproachPointComputationPhase(Eigen::Isometry3d objectPose) {
         cout <<"started computing" << endl;
         apResult.finished.store(false);
-        computeApproachConfig_thread_ = std::thread(&StateController::computeApproachTrajectory, this, objectPose);
+        Eigen::Matrix4d T_EE_0(Eigen::Matrix4d::Map(robot_state.O_T_EE.data()));
+        Eigen::Map<const Eigen::Matrix<double, 7, 1>> q(robot_state.q.data());
+        computeApproachConfig_thread_ = std::thread(&StateController::computeApproachTrajectory, this, N, objectPose, T_EE_0, q);
         state = State::ComputingApproachPoint;
     }
     
     array<double, 7> processApproachPointComputationPhase() {
+        
+        log_ << time() << "waiting" << " " << apResult.finished.load()  << endl;
         if (apResult.finished.load()) {
             lock_guard<std::mutex> lock(apResult.apResultMutex);
             approachParams = {time_stamp, apResult.reachTime, apResult.spline, 0, apResult.intervalDuration};
             state = State::Approaching;
+            cout <<"Switchig to appracoging" << endl;
         }
         return maintain_base_pos();
     }     
@@ -624,6 +646,7 @@ private:
     }
 
     array<double, 7> processApproachPhase() {
+         log_ << time() << " appr" <<endl;
          double timeSinceStart = time_stamp - approachParams.startTime;
          if (timeSinceStart > (approachParams.intervalNumber + 1) * approachParams.intervalDuration) approachParams.intervalNumber ++;
          if (approachParams.intervalNumber >= N - 1) throw runtime_error("Success");
@@ -640,6 +663,8 @@ private:
          Eigen::Map<const Eigen::Matrix<double, 7, 1>> dq(robot_state.dq.data());
          
          Eigen::VectorXd tau_cmd = Eigen::VectorXd::Zero(7);
+         cout << timeSinceStart << endl;
+         cout << (desiredQ - q).transpose()  << endl << (desiredDQ - dq).transpose(); 
          tau_cmd = Kp * (desiredQ - q) + Kd * (desiredDQ - dq) + mass * desiredDDQ + coriolis;
          std::array<double, 7> tau_d_array{};
          Eigen::VectorXd::Map(&tau_d_array[0], 7) = tau_cmd;
@@ -1158,13 +1183,14 @@ log_ik_ << "typost' " << visualServoingParams.desired_position << " " << vs_pose
 
 int main(int argc, char ** argv) {
     using namespace pinocchio;
+    /*
     cout <<"loh" ; 
     auto now = chrono::high_resolution_clock::now();
     Eigen::Isometry3d testobj;
     testobj.translation() = Eigen::Vector3d(0.766897,  -0.522604, -0.0341329);
     Eigen::VectorXd testconfig(7);
     testconfig << -0.463119, 0.00117603 , -0.600473,   -1.75616 ,  0.199755  ,  1.83604 , -0.281126;
-    std::vector<Eigen::VectorXd>  loh = generate_joint_waypoint(
+    std::vector<Eigen::VectorXd>  jointWaypoints = generate_joint_waypoint(
         20,
         4.83118,
         testobj,
@@ -1173,12 +1199,52 @@ int main(int argc, char ** argv) {
         Eigen::Vector3d(0.0, 0.0, 0.15)
     );
 
-    auto start = chrono::high_resolution_clock::now();
-    chrono::duration<double> duration = start - now;
-    for (auto i:loh) cout << i.transpose() << endl;
+            int N = 20;
+            double reachTime = 4.83118;
 
+            double intervalNumber = N - 1;
+            double deltaT = reachTime / intervalNumber;
+
+            vector<Eigen::VectorXd> jointVelocities(N);
+            jointVelocities[0] = Eigen::VectorXd::Zero(7);
+            jointVelocities.back() = Eigen::VectorXd::Zero(7);
+            for (int i = 1; i < N - 1; i ++) {jointVelocities[i] = (jointWaypoints[i + 1] - jointWaypoints[i - 1]) / (2 * deltaT);// cout << jointVelocities[i].transpose() << endl;
+                                                                                                                                  }
+            
+            vector<Eigen::VectorXd> jointAccelerations(N);
+            jointAccelerations[0] = Eigen::VectorXd::Zero(7);
+            jointAccelerations.back() = Eigen::VectorXd::Zero(7);
+            for (int i = 1; i < N - 1; i ++) jointAccelerations[i] = (jointVelocities[i + 1] - jointVelocities[i - 1]) / (2 * deltaT);
+
+            vector<vector<Eigen::VectorXd>> spline(intervalNumber);
+            for (int i = 0; i < intervalNumber; i ++) {
+                double timeP = i * deltaT;
+                double timeN = (i + 1) * deltaT;
+                vector<Eigen::VectorXd> localSpline(7);
+                for  (int joint = 0; joint < 7; joint ++) {
+                    double prevQ = jointWaypoints[i](joint);
+                    double nextQ = jointWaypoints[i + 1](joint);
+                    double prevV = jointVelocities[i](joint);
+                    double nextV = jointVelocities[i + 1](joint);
+                    double prevA = jointAccelerations[i](joint);
+                    double nextA = jointAccelerations[i + 1](joint);
+                    Eigen::Matrix<double, 6, 6> M;
+                    M <<  pow(timeP, 5),     pow(timeP, 4),     pow(timeP, 3),     pow(timeP, 2),  timeP, 1.0,
+                          pow(timeN, 5),     pow(timeN, 4),     pow(timeN, 3),     pow(timeN, 2),  timeN, 1.0,
+                          5.0*pow(timeP, 4), 4.0*pow(timeP, 3), 3.0*pow(timeP, 2), 2.0*timeP,      1.0, 0.0,
+                          5.0*pow(timeN, 4), 4.0*pow(timeN, 3), 3.0*pow(timeN, 2), 2.0*timeN,      1.0, 0.0,
+                          20.0*pow(timeP, 3),12.0*pow(timeP, 2), 6.0*timeP,         2.0,         0.0, 0.0,
+                          20.0*pow(timeN, 3),12.0*pow(timeN, 2),6.0*timeN,         2.0,         0.0, 0.0;
+                    Eigen::Matrix<double, 6, 1> b;
+                    b << prevQ, nextQ, prevV, nextV, prevA, nextA;
+                    Eigen::VectorXd coeffs = M.fullPivLu().solve(b);
+                    localSpline[joint] = coeffs;
+                }
+                spline[i] = localSpline;
+            }
+   
     throw runtime_error("stop sss");
-    
+    */
     // Robot set up
 
     if(!getenv("URDF"))throw std::runtime_error("no URDF env");

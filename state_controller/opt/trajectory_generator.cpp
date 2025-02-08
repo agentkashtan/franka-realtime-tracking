@@ -251,7 +251,7 @@ std::vector<Eigen::VectorXd> generate_joint_waypoint(
         {
             // final position error
             SX pos_err = pos_ee - vertcat(SX(robot_pos_fin(0)), SX(robot_pos_fin(1)), SX(robot_pos_fin(2)));
-            obj += 10* dot(pos_err, pos_err);
+            obj += 50* dot(pos_err, pos_err);
  
             // Instead of orientationErrorAngleAxis(R_ee, orient_fin), you used
             // the direct alignment with the direction to the object:
@@ -260,7 +260,7 @@ std::vector<Eigen::VectorXd> generate_joint_waypoint(
             SX z_unit = z_vec / z_norm_ee;
  
             SX err = 1.0 - dot(R_ee(Slice(),2), z_unit);  // 3rd column is 'z' axis
-            obj += 2 * dot(err, err);
+            obj += 50 * dot(err, err);
             obj += 1.5 * dot(dq_i, dq_i);
         }
         else
@@ -270,8 +270,8 @@ std::vector<Eigen::VectorXd> generate_joint_waypoint(
             SX z_norm_ee = sqrt(dot(z_vec, z_vec));
             SX z_unit = z_vec / z_norm_ee;
  
-            SX err = 1.0 - dot(R_ee(Slice(),2), z_unit);
-            obj += w_ori * dot(err, err);
+            SX err = 1 - dot(R_ee(Slice(),2), z_unit);
+            obj += 0.5 * dot(err, err);
             obj += 0.2 * dot(dq_i, dq_i);
 
         }
@@ -282,7 +282,7 @@ std::vector<Eigen::VectorXd> generate_joint_waypoint(
             SX q_prev = get_q(i - 1);
             SX dq_prev = get_dq(i - 1);
             SX error = q_i - q_prev - dq_prev * delta_t;
-            obj += 5 * dot(error, error);
+            obj += 50 * dot(error, error);
             
             SX ddq = dq_i - dq_prev;
             obj += 0.2 * dot(ddq, ddq);
@@ -331,11 +331,10 @@ std::vector<Eigen::VectorXd> generate_joint_waypoint(
     // -------------------------------------------------------------------------
     // 8. Initial guess
     std::vector<double> x0(2 * N * ndof, 0.2);
-    /*
-    for (int i = 0; i < N; i ++) x0.insert(x0.end(), robot_joint_config.data(), robot_joint_config.data() + robot_joint_config.size());
-    std::vector<double> temp(N * ndof, 0);
-    x0.insert(x0.end(), temp.begin(), temp.end());
-    */
+    //for (int i = 0; i < N; i ++) x0.insert(x0.end(), robot_joint_config.data(), robot_joint_config.data() + robot_joint_config.size());
+    //std::vector<double> temp(N * ndof, 0);
+    //x0.insert(x0.end(), temp.begin(), temp.end());
+    
     // -------------------------------------------------------------------------
     // 9. Build the NLP solver
     //    nlp  = {'x': q_sym, 'f': obj, 'g': g}
@@ -349,7 +348,7 @@ std::vector<Eigen::VectorXd> generate_joint_waypoint(
     opts_dict["ipopt.sb"] = "yes";
     opts_dict["print_time"] = 0;
 
-    Function solver = nlpsol("solver", "ipopt", nlp); //opts_dict);
+    Function solver = nlpsol("solver", "ipopt", nlp, opts_dict);
  
     // -------------------------------------------------------------------------
     // 10. Solve
