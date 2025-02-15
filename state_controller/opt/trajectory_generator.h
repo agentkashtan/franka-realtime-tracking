@@ -30,7 +30,8 @@ std::vector<Eigen::VectorXd> generate_joint_waypoint(
         Eigen::Isometry3d obj_init_pose,
         Eigen::Vector3d obj_vel,
         Eigen::VectorXd robot_joint_config,
-        Eigen::Vector3d offset
+        Eigen::Vector3d offset,
+        Eigen::Matrix3d graspingTransformation
         );
 
 #endif //  TRAJECTORY_GENERATOR_H

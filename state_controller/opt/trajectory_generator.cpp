@@ -146,7 +146,8 @@ std::vector<Eigen::VectorXd> generate_joint_waypoint(
         Eigen::Isometry3d obj_init_pose,
         Eigen::Vector3d obj_vel,
         Eigen::VectorXd robot_joint_config,
-        Eigen::Vector3d offset
+        Eigen::Vector3d offset,
+        Eigen::Matrix3d graspingTransformation
         )
 { 
     // -------------------------------------------------------------------------
@@ -162,25 +163,14 @@ std::vector<Eigen::VectorXd> generate_joint_waypoint(
     // 4. Compute final pose
     Eigen::Vector3d robot_pos_fin = obj_init_pos + obj_vel * total_time + offset;
  
-    // We'll define some axis to orient the end-effector at final
-    // (From your snippet: x_fin = [0,1,0], z_fin = - offset / ||offset||, etc.)
-    /*
-    Eigen::Vector3d x_fin(0.0, 1.0, 0.0);
- 
-    // z_fin = -offset / norm(offset)
-    
-    Eigen::Vector3d z_fin = - offset / offset.norm();
-  
-    // y_fin = cross(z_fin,x_fin)
-    Eigen::Vector3d y_fin = z_fin.cross(x_fin);
+    Eigen::Matrix3d orientationFinalEigen = obj_init_pose.linear() * graspingTransformation;
     DM orient_fin = DM::zeros(3 ,3);
     for (int i = 0; i < 3; i ++) {
-        orient_fin(0, i) = x_fin(i);
-        orient_fin(1, i) = y_fin(i);
-        orient_fin(2, i) = z_fin(i);
+        for (int j = 0; j < 3; j ++) {
+            orient_fin(i, j) = orientationFinalEigen(i, j);
+        }
     }
-    */	
-
+  
     double delta_t = total_time / (N - 1);
  
     // Create CasADi decision variable: q_sym in R^(7*N)
@@ -255,17 +245,22 @@ std::vector<Eigen::VectorXd> generate_joint_waypoint(
  
             // Instead of orientationErrorAngleAxis(R_ee, orient_fin), you used
             // the direct alignment with the direction to the object:
+            /*
             SX z_vec = vertcat(SX(intermediate_obj_pos[i](0)), SX(intermediate_obj_pos[i](1)), SX(intermediate_obj_pos[i](2))) - pos_ee;
             SX z_norm_ee = sqrt(dot(z_vec, z_vec));
             SX z_unit = z_vec / z_norm_ee;
- 
+           
             SX err = 1.0 - dot(R_ee(Slice(),2), z_unit);  // 3rd column is 'z' axis
+            */  
+            SX err = orientationErrorAngleAxis(R_ee, orient_fin);
+
+            
             obj += 50 * dot(err, err);
             obj += 1.5 * dot(dq_i, dq_i);
         }
         else
         {
-            // intermediate orientation term
+           // intermediate orientation term
             SX z_vec = vertcat(SX(intermediate_obj_pos[i](0)), SX(intermediate_obj_pos[i](1)), SX(intermediate_obj_pos[i](2)))  - pos_ee;
             SX z_norm_ee = sqrt(dot(z_vec, z_vec));
             SX z_unit = z_vec / z_norm_ee;
