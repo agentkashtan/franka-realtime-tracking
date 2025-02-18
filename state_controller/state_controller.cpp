@@ -351,7 +351,7 @@ public:
 	        Kp.diagonal() << 200, 200, 200, 200, 200, 200,200;
             Kd.diagonal() << 20, 20, 20, 20, 20, 20, 8;
             
-            CONVEYOR_BELT_SPEED << -0.0433, 0.0, 0.0;
+            CONVEYOR_BELT_SPEED << -0.042704, 0.0, 0.0;
             OFFSET << 0.0, 0.0, 0.15;
             /*
             GRASPING_TRANSFORMATION << cos(M_PI), 0, sin(M_PI),
@@ -417,6 +417,8 @@ public:
         }
     }
     Eigen::Matrix<double, 7, 1> q_base;
+    Eigen::Vector3d testP;
+    Eigen::Matrix3d testO; 
 
 private:
     int maxMissingFrames;
@@ -482,6 +484,17 @@ private:
 
     Eigen::VectorXd cartesianController(Eigen::VectorXd q, Eigen::VectorXd dq, Eigen::Vector3d position_d, Eigen::Matrix3d orientation_d, Eigen::Vector3d obj_velocity, Eigen::Matrix<double, 6, 7>jacobian, Eigen::Matrix4d T_ee_0) {
         Eigen::MatrixXd w = Eigen::MatrixXd::Identity(7, 7);
+        const double translational_stiffness{300.0};
+        const double rotational_stiffness{50.0};
+        Eigen::MatrixXd stiffness(6, 6), damping(6, 6);
+        stiffness.setZero();
+        stiffness.topLeftCorner(3, 3) << translational_stiffness * Eigen::MatrixXd::Identity(3, 3);
+        stiffness.bottomRightCorner(3, 3) << rotational_stiffness * Eigen::MatrixXd::Identity(3, 3);
+        damping.setZero();
+        damping.topLeftCorner(3, 3) << 2.0 * sqrt(translational_stiffness) *
+                                           Eigen::MatrixXd::Identity(3, 3);
+        damping.bottomRightCorner(3, 3) << 2.0 * sqrt(rotational_stiffness) *
+                                               Eigen::MatrixXd::Identity(3, 3);
         Eigen::DiagonalMatrix<double, 6> Kp_ts(300, 300, 300, 30, 30, 30);
         Eigen::DiagonalMatrix<double, 7> Kd(20, 20, 20, 20, 20, 20, 8);
 
@@ -498,9 +511,14 @@ private:
         q_dot_des_ts.head(3) = obj_velocity;
         
         Eigen::VectorXd q_dot_des_js = w.inverse() * jacobian.transpose() * (jacobian * w.inverse() * jacobian.transpose()).inverse() * q_dot_des_ts;
+        //q_dot_des_js.setZero();
 
         Eigen::VectorXd tau(7);
-        tau = jacobian.transpose() * Kp_ts * error_p + Kd * (q_dot_des_js - dq);
+        tau = jacobian.transpose() * ( stiffness * error_p + damping * jacobian * (q_dot_des_js - dq) );
+        //tau = jacobian.transpose() * Kp_ts * error_p + Kd * (q_dot_des_js - dq);
+
+
+
 
         return tau;
     }
@@ -719,6 +737,7 @@ private:
     }
     Eigen::Vector3d real;
     array<double, 7> processVisualServoing() {
+        
         Eigen::Vector3d pose;
         std::lock_guard<std::mutex> lock(cameraDataMutex);
         convert_to_global(cameraData);
@@ -746,24 +765,28 @@ private:
         if (visualServoingParams.estimator == nullptr) return maintain_base_pos();
         //cout << "actual vs" << endl;
           
-        double MAX_RATE = 0.01;
-        double alpha = 0.95;
-
+        // Kalman filter
         visualServoingParams.estimator->predict(time_stamp);
         auto [estimatedObjectData, _ ] = visualServoingParams.estimator->get_state();
         log_vs_ << time() << " "  <<  estimatedObjectData.head(3).transpose() << " "; 
+
+        // Rate limiter
+        double MAX_RATE = 0.01;
         Eigen::Vector3d desiredChange = estimatedObjectData.head(3) - visualServoingParams.filteredObjectPosition;
-        desiredChange = desiredChange.cwiseMin(MAX_RATE);
-        desiredChange = desiredChange.cwiseMax(- MAX_RATE);
-        
-        Eigen::Vector3d previousState = visualServoingParams.filteredObjectPosition;
-        visualServoingParams.filteredObjectPosition += desiredChange;
+        Eigen::Vector3d saturedChange = desiredChange;
+        saturedChange = saturedChange.cwiseMin(MAX_RATE);
+        saturedChange = saturedChange.cwiseMax(- MAX_RATE);
+        Eigen::Vector3d saturedObjectPosition = visualServoingParams.filteredObjectPosition + saturedChange; 
+
         log_vs_ <<real.transpose() << " ";
 
-        visualServoingParams.filteredObjectPosition = alpha * previousState + (1 - alpha) * visualServoingParams.filteredObjectPosition;
+        // Low pass filter
+        double alpha = 0.05;
+        visualServoingParams.filteredObjectPosition += alpha * ( saturedObjectPosition - visualServoingParams.filteredObjectPosition);
 
         Eigen::Vector3d objectVelocity = CONVEYOR_BELT_SPEED;// (visualServoingParams.filteredObjectPosition  - previousState) / (time_stamp - visualServoingParams.previousTimeStamp);
         visualServoingParams.previousTimeStamp = time_stamp;
+   
 
         array<double, 7> coriolisArray = model.coriolis(robot_state);
         array<double, 42> jacobianArray = model.zeroJacobian(franka::Frame::kEndEffector, robot_state);
@@ -772,14 +795,16 @@ private:
         Eigen::Map<const Eigen::Matrix<double, 7, 1>> q(robot_state.q.data());
         Eigen::Map<const Eigen::Matrix<double, 7, 1>> dq(robot_state.dq.data());
         Eigen::Matrix4d T_EE_0(Eigen::Matrix4d::Map(robot_state.O_T_EE.data()));
-        log_vs_ << visualServoingParams.filteredObjectPosition.transpose() << endl;
         Eigen::VectorXd tauCmd;
-        //Eigen::VectorXd cartesianController(Eigen::VectorXd q, Eigen::VectorXd dq, Eigen::Vector3d position_d, Eigen::Matrix3d orientation_d, Eigen::Vector3d obj_velocity, Eigen::Matrix<double, 6, 7>jacobian, Eigen::Matrix4d T_ee_0) {
-
-
+        
         tauCmd = cartesianController(q, dq, visualServoingParams.filteredObjectPosition + OFFSET, GRASPING_ORIENTATION, objectVelocity, jacobian, T_EE_0);
+        
+        //tauCmd = cartesianController(q, dq, cameraData.pose.translation() + OFFSET, GRASPING_ORIENTATION, Eigen::Vector3d::Zero(), jacobian, T_EE_0);
+
         //cout << tauCmd << endl;
         tauCmd += coriolis;
+        log_vs_ << time() << " " << tauCmd.norm()<< endl;
+
         std::array<double, 7> tau_d_array{};
         Eigen::VectorXd::Map(&tau_d_array[0], 7) = tauCmd;
         
@@ -1383,13 +1408,19 @@ int main(int argc, char ** argv) {
 	cfg.enable_stream(RS2_STREAM_COLOR, 640, 480, RS2_FORMAT_RGB8, fps);
     cfg.enable_stream(RS2_STREAM_DEPTH, 640, 480, RS2_FORMAT_Z16, fps);
     cfg.enable_device("123622270300");
+    
     auto realsense_callback = [&socket](const rs2::frame& frame) {
             rs2::frameset fs = frame.as<rs2::frameset>();
-            if(!fs)return;
+            if(!fs) {
+                cout << "no fs" << endl;
+                return;
+            }
             rs2::video_frame cur_frame = fs.get_color_frame();
             rs2::depth_frame dframe = fs.get_depth_frame();
-            if(!cur_frame || !dframe)return;
-
+            if(!cur_frame || !dframe) {
+                cout << "no rgbd" << endl;   
+                return;
+            }
             rs2::video_frame video_frame = cur_frame.as<rs2::video_frame>();
             int width = video_frame.get_width();
             int height = video_frame.get_height();
@@ -1426,12 +1457,12 @@ int main(int argc, char ** argv) {
 
 	        zmq::message_t msg_depth(compressed_dframe.size());
             memcpy(msg_depth.data(), compressed_dframe.data(), compressed_dframe.size());
-
+            
             socket.send(msg_color, zmq::send_flags::sndmore);
 	        socket.send(msg_depth, zmq::send_flags::sndmore);
             socket.send(msg_timestamp, zmq::send_flags::none);
     };
-
+   
     rs2::pipeline_profile profile = pipe.start(cfg, realsense_callback);
     auto intrinsics = pipe.get_active_profile().get_stream(rs2_stream::RS2_STREAM_COLOR).as<rs2::video_stream_profile>().get_intrinsics();
     cout << intrinsics.fx << endl;
@@ -1449,8 +1480,10 @@ int main(int argc, char ** argv) {
     Eigen::Map<const Eigen::Matrix<double, 7, 1>> q_init(initial_state.q.data());
     
     Eigen::Matrix4d O_ee_0(Eigen::Matrix4d::Map(initial_state.O_T_EE.data()));
- 
+
     controller.q_base = q_init; 
+    controller.testP = O_ee_0.topRightCorner<3,1>()+ Eigen::Vector3d(0, 0, 0.1);
+    controller.testO = O_ee_0.topLeftCorner<3,3>();
     auto control_callback = [&](const franka::RobotState& robot_state,
                                       franka::Duration period) -> franka::Torques {
         time += period.toSec();
