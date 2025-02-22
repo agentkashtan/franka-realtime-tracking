@@ -26,6 +26,15 @@ void MovementEstimator::correct(Eigen::Vector3d measurement) {
     P = new_P;
 }
 
+
+void MovementEstimator::set_state(Eigen::VectorXd newState, Eigen::MatrixXd newP, double newTimestamp) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    P = newP;
+    state_estimate = newState;
+    prev_t = newTimestamp;
+}
+
+
 std::pair<Eigen::VectorXd, Eigen::MatrixXd> MovementEstimator::get_state() {
     std::lock_guard<std::mutex> lock(mutex_);
     return {state_estimate, P};

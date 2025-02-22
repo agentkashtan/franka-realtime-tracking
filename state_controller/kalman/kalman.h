@@ -12,6 +12,7 @@ public:
 
     // Predict function declaration
     std::pair<Eigen::VectorXd, Eigen::MatrixXd> get_state();
+    void set_state(Eigen::VectorXd newState, Eigen::MatrixXd newP, double newTimestamp);
     void predict(double t);
     void correct(Eigen::Vector3d measurement);
 
