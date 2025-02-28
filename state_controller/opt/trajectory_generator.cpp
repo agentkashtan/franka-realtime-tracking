@@ -151,16 +151,12 @@ std::vector<Eigen::VectorXd> generate_joint_waypoint(
         )
 { 
     // -------------------------------------------------------------------------
-    // 2. Compute initial orientation
     int ndof = 7;
-
     Eigen::Vector3d obj_init_pos = obj_init_pose.translation();
-    
     SX robotJointPositionSX = SX::zeros(7);
     for (int i = 0; i < ndof; i ++) robotJointPositionSX(i) = robot_joint_config(i);
 
     // -------------------------------------------------------------------------
-    // 4. Compute final pose
     Eigen::Vector3d robot_pos_fin = obj_init_pos + obj_vel * total_time + offset;
  
     Eigen::Matrix3d orientationFinalEigen = obj_init_pose.linear() * graspingTransformation;
@@ -172,11 +168,9 @@ std::vector<Eigen::VectorXd> generate_joint_waypoint(
     }
   
     double delta_t = total_time / (N - 1);
- 
-    // Create CasADi decision variable: q_sym in R^(7*N)
+
     SX q_sym = SX::sym("q", ndof * N * 2);
- 
-    // Helper to extract q_i (7x1) from the flattened q_sym
+
     auto get_q = [&](int i)
     {
         SX out = SX::zeros(ndof);
@@ -195,34 +189,22 @@ std::vector<Eigen::VectorXd> generate_joint_waypoint(
         return out;
     };
 
- 
-    // We define some weights
-    double w_pos_terminal = 3.0;
-    double w_ori_terminal = 2.0;
-    double w_ori          = 1.0;
-    double w_smooth       = 0.2;
- 
-    // Precompute the object position at each time step
     std::vector<Eigen::Vector3d> intermediate_obj_pos(N);
     for (int i = 0; i < N; i ++){
         intermediate_obj_pos[i] = obj_init_pos + i * delta_t * obj_vel;
     }
-    std::cout << "obj" << intermediate_obj_pos[19].transpose() << std::endl; 
-    // Build objective
+  
     SX obj = SX::zeros(1);
  
-    // (We won't add constraints in g_list for this snippet, but you could.)
     std::vector<SX> g_list;
     std::vector<double> lbg_list, ubg_list;
  
-    // Joint limits
+ 
     std::vector<double> upperJointsLimits = {2.8973,  1.7628,  2.8973, -0.0698, 2.8973, 3.7525, 2.8973};
     std::vector<double> lowerJointsLimits = {-2.8973, -1.7628, -2.8973, -3.0718, -2.8973, -0.0175, -2.8973};
     std::vector<double> upperVelocityLimits = {2, 2, 2, 2, 2, 2, 2};
     std::vector<double> lowerVelocityLimits = {-2, -2, -2, -2, -2, -2, -2};
-
-    
-    
+   
     for (int i=0; i<N; i++)
     {
         SX q_i = get_q(i);
@@ -239,28 +221,14 @@ std::vector<Eigen::VectorXd> generate_joint_waypoint(
         }
         else if (i == N-1)
         {
-            // final position error
             SX pos_err = pos_ee - vertcat(SX(robot_pos_fin(0)), SX(robot_pos_fin(1)), SX(robot_pos_fin(2)));
             obj += 50* dot(pos_err, pos_err);
- 
-            // Instead of orientationErrorAngleAxis(R_ee, orient_fin), you used
-            // the direct alignment with the direction to the object:
-            /*
-            SX z_vec = vertcat(SX(intermediate_obj_pos[i](0)), SX(intermediate_obj_pos[i](1)), SX(intermediate_obj_pos[i](2))) - pos_ee;
-            SX z_norm_ee = sqrt(dot(z_vec, z_vec));
-            SX z_unit = z_vec / z_norm_ee;
-           
-            SX err = 1.0 - dot(R_ee(Slice(),2), z_unit);  // 3rd column is 'z' axis
-            */  
-            SX err = orientationErrorAngleAxis(R_ee, orient_fin);
-
-            
+            SX err = orientationErrorAngleAxis(R_ee, orient_fin);   
             obj += 50 * dot(err, err);
             obj += 1.5 * dot(dq_i, dq_i);
         }
         else
         {
-           // intermediate orientation term
             SX z_vec = vertcat(SX(intermediate_obj_pos[i](0)), SX(intermediate_obj_pos[i](1)), SX(intermediate_obj_pos[i](2)))  - pos_ee;
             SX z_norm_ee = sqrt(dot(z_vec, z_vec));
             SX z_unit = z_vec / z_norm_ee;
@@ -271,7 +239,6 @@ std::vector<Eigen::VectorXd> generate_joint_waypoint(
 
         }
  
-        // Smoothness
         if (i > 0)
         {
             SX q_prev = get_q(i - 1);
@@ -285,7 +252,6 @@ std::vector<Eigen::VectorXd> generate_joint_waypoint(
     }
  
     // -------------------------------------------------------------------------
-    // 6. Create constraints container g (dummy, if none)
     SX g;
     if (!g_list.empty())
     {
@@ -293,18 +259,14 @@ std::vector<Eigen::VectorXd> generate_joint_waypoint(
     }
     else
     {
-        // If truly no constraints, put a dummy to keep IPOPT happy
         g = SX::zeros(1);
         lbg_list.push_back(0.0);
         ubg_list.push_back(0.0);
     }
- 
-    // Build final lbg, ubg
     DM lbg = DM(lbg_list);
     DM ubg = DM(ubg_list);
  
     // -------------------------------------------------------------------------
-    // 7. Build bounds for decision variables
     std::vector<double> lbq, ubq;
     lbq.reserve(2*N*ndof);
     ubq.reserve(2*N*ndof);
@@ -321,19 +283,8 @@ std::vector<Eigen::VectorXd> generate_joint_waypoint(
         }
     }
 
-
- 
     // -------------------------------------------------------------------------
-    // 8. Initial guess
     std::vector<double> x0(2 * N * ndof, 0.2);
-    //for (int i = 0; i < N; i ++) x0.insert(x0.end(), robot_joint_config.data(), robot_joint_config.data() + robot_joint_config.size());
-    //std::vector<double> temp(N * ndof, 0);
-    //x0.insert(x0.end(), temp.begin(), temp.end());
-    
-    // -------------------------------------------------------------------------
-    // 9. Build the NLP solver
-    //    nlp  = {'x': q_sym, 'f': obj, 'g': g}
-    //    solver = nlpsol('solver', 'ipopt', nlp)
     SXDict nlp;
     nlp["x"] = q_sym;
     nlp["f"] = obj;
@@ -346,7 +297,6 @@ std::vector<Eigen::VectorXd> generate_joint_waypoint(
     Function solver = nlpsol("solver", "ipopt", nlp, opts_dict);
  
     // -------------------------------------------------------------------------
-    // 10. Solve
     std::map<std::string, DM> arg, res;
     arg["lbx"] = lbq;
     arg["ubx"] = ubq;
@@ -354,23 +304,124 @@ std::vector<Eigen::VectorXd> generate_joint_waypoint(
     arg["ubg"] = ubg;
     arg["x0"]  = x0;
  
-    // Solve
     res = solver(arg);
- 
-    // Extract solution
+
     std::vector<double> q_opt = std::vector<double>(res["x"]);
- 
-    // q_opt is in row-major flattening.  If you want it reshaped:
-    //    q_opt_mat = q_opt.reshape((ndof, N), 'F').T in Python
-    // In C++, you can manually reorder if needed. For demonstration:
-    // Just show first few or do your own reshaping as needed.
     std::vector<Eigen::VectorXd> result(N);
     for (int i = 0; i < N; i ++){
         Eigen::Map<Eigen::VectorXd> vec(&q_opt[i * ndof], ndof);
         result[i] = vec;
     }
-    //std::cout << "result ";
-    //std::cout << result[0].transpose() << std::endl << result[N-2].transpose() ;
     return result;
+}
+
+Eigen::VectorXd solveInverseKinematics(
+        Eigen::Matrix<double, 7, 1> initialJointConfiguration,
+        Eigen::Matrix<double, 4, 4> desiredPose
+        )
+{ 
+    int ndof = 7;
+    SX q_sym = SX::sym("q", ndof * 2);
+    auto get_q = [&](int i)
+    {
+        SX out = SX::zeros(ndof);
+        for (int j = 0; j < ndof; ++j) {
+            out(j) = q_sym(i*ndof + j);
+        }
+        return out;
+    };
+       
+    SX qInitial = get_q(0);
+    SX qFinal = get_q(1);
+
+    SX obj = SX::zeros(1);
+    SX difference = qInitial - qFinal;
+    obj = dot(difference, difference); 
+
+    std::vector<SX> g_list;
+    std::vector<double> lbg_list, ubg_list;
+
+    for (int i = 0; i < ndof; i ++) {
+        g_list.push_back(qInitial(i) - initialJointConfiguration(i));
+        lbg_list.push_back(0.0);
+        ubg_list.push_back(0.0);
+    }
+   
+   auto endEffectorPose = forward_kinematics(qFinal);
+   SX endEffectorPosition = endEffectorPose.first;
+   SX endEffectorOrientation = endEffectorPose.second;
+   SX orientationDesiredCA = SX::zeros(3,3);
+   for (int i = 0; i < 3; i ++) {
+        for (int j = 0; j < 3; j ++) {
+            orientationDesiredCA(i, j) = desiredPose(i, j);
+        }
+   }
+   SX angleAxisErr = orientationErrorAngleAxis(endEffectorOrientation, orientationDesiredCA);
+   for (int i = 0; i < 3; i ++) {
+        g_list.push_back(angleAxisErr(i));
+        lbg_list.push_back(0.0);
+        ubg_list.push_back(0.0);
+   }
+    
+   for (int i = 0; i < 3; i ++) {
+        g_list.push_back(endEffectorPosition(i) - desiredPose(i, 3));
+        lbg_list.push_back(0.0);
+        ubg_list.push_back(0.0);
+   }
+
+   std::vector<double> upperJointsLimits = {2.8973,  1.7628,  2.8973, -0.0698, 2.8973, 3.7525, 2.8973};
+   std::vector<double> lowerJointsLimits = {-2.8973, -1.7628, -2.8973, -3.0718, -2.8973, -0.0175, -2.8973};
+   
+   SX g;
+   if (!g_list.empty())
+   {
+        g = vertcat(g_list);
+   }
+   else
+   {
+        g = SX::zeros(1);
+        lbg_list.push_back(0.0);
+        ubg_list.push_back(0.0);
+   }
+   DM lbg = DM(lbg_list);
+   DM ubg = DM(ubg_list);
+ 
+   std::vector<double> lbq, ubq;
+   lbq.reserve(2 * ndof);
+   ubq.reserve(2 * ndof);
+   for (int i = 0; i < 2; i ++){
+       for (int j = 0; j < ndof; j ++){
+            lbq.push_back(lowerJointsLimits[j]);
+            ubq.push_back(upperJointsLimits[j]);
+        }
+   }
+
+   std::vector<double> x0(2 * ndof);
+   for (int i = 0; i < ndof; i ++) {
+        x0[i] = initialJointConfiguration(i);
+        x0[i + ndof] = initialJointConfiguration(i);
+   }
+   SXDict nlp;
+   nlp["x"] = q_sym;
+   nlp["f"] = obj;
+   nlp["g"] = g;
+   Dict opts_dict=Dict();
+   opts_dict["ipopt.print_level"] = 0;
+   opts_dict["ipopt.sb"] = "yes";
+   opts_dict["print_time"] = 0;
+   Function solver = nlpsol("solver", "ipopt", nlp, opts_dict);
+ 
+   std::map<std::string, DM> arg, res;
+   arg["lbx"] = lbq;
+   arg["ubx"] = ubq;
+   arg["lbg"] = lbg;
+   arg["ubg"] = ubg;
+   arg["x0"]  = x0;
+ 
+   res = solver(arg);
+   std::vector<double> q_opt = std::vector<double>(res["x"]);
+   Eigen::VectorXd result(7);
+   for (int i = 0; i < ndof; i ++) result(i) = q_opt[ndof + i];
+   return result;
 }
 

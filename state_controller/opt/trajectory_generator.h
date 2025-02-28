@@ -11,17 +11,10 @@ using namespace casadi;
 
 double feasibleMinTime(Eigen::Vector3d  objectPosition, Eigen::Vector3d objectVelocity, Eigen::Vector3d robotPosition, double maxCartesianVelocity);
 
-/// DH link transform
 SX link_transform(double a, double alpha, double d, const SX &theta);
  
-//------------------------------------------------------------------------------
- 
-/// Orientation error via Angle-Axis
 SX orientationErrorAngleAxis(const SX &R_current, const SX &R_des);
  
-//------------------------------------------------------------------------------
- 
-/// Forward kinematics for the described manipulator
 std::pair<SX,SX> forward_kinematics(const SX &q);
 
 std::vector<Eigen::VectorXd> generate_joint_waypoint(
@@ -32,6 +25,11 @@ std::vector<Eigen::VectorXd> generate_joint_waypoint(
         Eigen::VectorXd robot_joint_config,
         Eigen::Vector3d offset,
         Eigen::Matrix3d graspingTransformation
+        );
+
+Eigen::VectorXd solveInverseKinematics(
+        Eigen::Matrix<double, 7, 1> initialJointConfiguration,
+        Eigen::Matrix<double, 4, 4>  desiredPose
         );
 
 #endif //  TRAJECTORY_GENERATOR_H
