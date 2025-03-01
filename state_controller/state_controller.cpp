@@ -220,7 +220,9 @@ enum class LiftingSubState {
     Lift,
     ComputeTransport,
     Transport,
-    Placement,
+    PlacementDown,
+    DropOff,
+    PlacementUp,
 };
 
 
@@ -278,6 +280,7 @@ struct LiftingParams {
     Eigen::VectorXd transportConfig;
     double transportTime;
     vector<Eigen::VectorXd> transportCoeffs;
+    Eigen::Isometry3d actualGrasp;
 };
 
 
@@ -316,13 +319,14 @@ void adjustComputeThreadPriority(std::thread& compute_thread) {
 
 class StateController {
 public:
-    StateController(franka::Model& model, franka::Gripper& gripper, int maxMissingFrames, int observationWindow)
+    StateController(franka::Model& model, franka::Gripper& gripper, int maxMissingFrames, int observationWindow, Eigen::VectorXd qInit)
         : maxMissingFrames(maxMissingFrames),
           observationWindow(observationWindow),
           gripper_(gripper),
           model(model),
           state(State::Idle),
-          missingFrames(0) {
+          missingFrames(0),
+          q_base(qInit) {
             log_ik_ = std::ofstream("/dev/shm/ik.log");
 	        log_ = std::ofstream("/dev/shm/controller.log");
             
@@ -344,6 +348,7 @@ public:
                                       0, 0, 1;
             LIFT_HEIGHT = 0.4;
             DROP_OFF_POSITION << 0.55, -0.1, 0; 
+            OBJECT_BOTTOM_TO_CENTRE = 0.075;
           }
 
     string time(){
@@ -408,6 +413,7 @@ private:
     Eigen::Matrix3d GRASPING_TRANSFORMATION;
     Eigen::Vector3d DROP_OFF_POSITION;
     double LIFT_HEIGHT;
+    double OBJECT_BOTTOM_TO_CENTRE;
 
     double MAX_CARTESIAN_VELOCITY = 0.1;
     int N = 20;
@@ -437,10 +443,19 @@ private:
     void convert_to_global(CameraData& data) {
         if (!data.global_frame) {
 	        data.global_frame = true;
-	        Eigen::Isometry3d T_ee_o(Eigen::Matrix4d::Map(robot_state.O_T_EE.data()));
-	        data.pose = T_ee_o * data.pose;
+	        Eigen::Isometry3d T_EE_0(Eigen::Matrix4d::Map(robot_state.O_T_EE.data()));
+	        data.pose = T_EE_0 * data.pose;
 	    }    
     }
+
+    void convertToEEFrame(CameraData& data) {
+        if (data.global_frame) {
+            data.global_frame = false;
+            Eigen::Isometry3d T_EE_0(Eigen::Matrix4d::Map(robot_state.O_T_EE.data()));
+            data.pose = T_EE_0.inverse() * data.pose;
+        }
+    }
+
     
     array<double, 7> maintain_base_pos() {
         array<double, 7> coriolisArray = model.coriolis(robot_state);
@@ -874,6 +889,7 @@ private:
                 }
             } else {
                 if (workerFinished.load(std::memory_order_acquire)) {
+                    workerThread_.join();
                     state = State::Lifting;
                     Eigen::Isometry3d currentPose;
                     Eigen::Isometry3d liftingGoalPose;
@@ -945,6 +961,12 @@ private:
         workerFinished.store(true, std::memory_order_release);
     }
 
+    void openGripper() {
+        workerFinished.store(false, std::memory_order_release);
+        this->gripper_.move(0.08, 0.1);
+        workerFinished.store(true, std::memory_order_release);
+    }
+
     array<double, 7> processLifting() {
         array<double, 7> coriolisArray = model.coriolis(robot_state);
         array<double, 42> jacobianArray = model.zeroJacobian(franka::Frame::kEndEffector, robot_state);
@@ -960,37 +982,42 @@ private:
         double MAX_CARTESIAN_DISPLACEMENT = 0.00005;
         Eigen::VectorXd tauCmd;
         switch (liftingParams.subState) {
-            case LiftingSubState::Lift: {
+            case LiftingSubState::Lift: {                           
                 if ((liftingParams.currentPose.translation() - liftingParams.liftingGoalPose.translation()).norm() <= sqrt(3 * pow(0.005, 2))) {
                     liftingParams.subState = LiftingSubState::ComputeTransport;
                     q_base = q;
                     workerFinished.store(false, std::memory_order_release);
                     Eigen::Vector3d desiredTransportPosition = DROP_OFF_POSITION;
-                    desiredTransportPosition(2) = LIFT_HEIGHT;
-                    
+                    desiredTransportPosition(2) = LIFT_HEIGHT; 
                     Eigen::Isometry3d transportPose;
                     transportPose.translation() = desiredTransportPosition;
                     transportPose.linear() = liftingParams.liftingGoalPose.linear();
-                                
                     workerThread_ = thread(&StateController::computeTransportConfig, this, q, transportPose.matrix());
+                    lock_guard<mutex> lock(cameraDataMutex);
+                    convertToEEFrame(cameraData);
+                    liftingParams.actualGrasp = cameraData.pose;
+                    return maintain_base_pos();
                 }
                 Eigen::Vector3d saturatedChange  = liftingParams.liftingGoalPose.translation() - liftingParams.currentPose.translation();
                 saturatedChange = saturatedChange.cwiseMin(MAX_CARTESIAN_DISPLACEMENT);
                 saturatedChange = saturatedChange.cwiseMax(- MAX_CARTESIAN_DISPLACEMENT);
                 liftingParams.currentPose.translation() += saturatedChange;
                 tauCmd = cartesianController(q, dq, liftingParams.currentPose.translation() , liftingParams.liftingGoalPose.linear(), Eigen::Vector3d::Zero(), jacobian, T_EE_0);
-
+                tauCmd += coriolis;
+                std::array<double, 7> tau_d_array{};
+                Eigen::VectorXd::Map(&tau_d_array[0], 7) = tauCmd;
+                return tau_d_array;
             }
             case LiftingSubState::ComputeTransport: {
                 if (workerFinished.load(std::memory_order_acquire)) { 
+                    workerThread_.join();
                     Eigen::Vector3d desiredTransportPosition = DROP_OFF_POSITION;
                     desiredTransportPosition(2) = LIFT_HEIGHT;
-                    double transportExecutionTime = (T_EE_0.topRightCorner<3, 1>() - desiredTransportPosition).norm() / 0.05;
+                    double transportExecutionTime = (T_EE_0.topRightCorner<3, 1>() - desiredTransportPosition).norm() / 0.075;
                     double finalTime = time_stamp + transportExecutionTime; 
                     lock_guard<mutex> lock(workerMutex);
                     coeffs = vector<Eigen::VectorXd>(7);
                     cout << "config -> " <<  liftingParams.transportConfig.transpose() << endl;
-                    throw runtime_error("done 228");
                     for (int i = 0; i < 7; i ++) {
                         Eigen::Matrix<double, 6, 6> A;
                         A <<  pow(time_stamp, 5),     pow(time_stamp, 4),     pow(time_stamp, 3),     pow(time_stamp, 2),  time_stamp, 1.0,
@@ -1016,10 +1043,69 @@ private:
                     Eigen::VectorXd desiredDQ = result[1];
                     Eigen::VectorXd desiredDDQ = result[2];
                     tauCmd = Kp * (desiredQ - q) + Kd * (desiredDQ - dq) + mass * desiredDDQ;
-                } else throw runtime_error("done");
+                    tauCmd += coriolis;
+                    std::array<double, 7> tau_d_array{};
+                    Eigen::VectorXd::Map(&tau_d_array[0], 7) = tauCmd;
+                    return tau_d_array;
+                } else {
+                    q_base = q;
+                    liftingParams.subState = LiftingSubState::PlacementDown;
+                    Eigen::Vector3d desiredTransportPosition = DROP_OFF_POSITION;
+                    //Depends on object placement config // TODO implement that based on grasping orientation
+                    desiredTransportPosition(2) = OBJECT_BOTTOM_TO_CENTRE + liftingParams.actualGrasp.translation()(2);
+                    liftingParams.liftingGoalPose.translation() = desiredTransportPosition;
+                    liftingParams.currentPose.linear() = T_EE_0.topLeftCorner<3, 3>();
+                    liftingParams.currentPose.translation() = T_EE_0.topRightCorner<3, 1>();
+                    return maintain_base_pos();
+                }
              }
+             case LiftingSubState::PlacementDown: {
+                cout << (liftingParams.currentPose.translation() - liftingParams.liftingGoalPose.translation()).norm() << endl; 
+                if ((liftingParams.currentPose.translation() - liftingParams.liftingGoalPose.translation()).norm() <= sqrt(3 * pow(0.005, 2))) {
+                    cout << "on the ground" << endl;
+                    liftingParams.subState = LiftingSubState::DropOff;
+                    q_base = q;
+                    workerFinished.store(false, std::memory_order_release);
+                    workerThread_ = thread(&StateController::openGripper, this);
+                    return maintain_base_pos();
+                }
+                Eigen::Vector3d saturatedChange  = liftingParams.liftingGoalPose.translation() - liftingParams.currentPose.translation();
+                saturatedChange = saturatedChange.cwiseMin(MAX_CARTESIAN_DISPLACEMENT);
+                saturatedChange = saturatedChange.cwiseMax(- MAX_CARTESIAN_DISPLACEMENT);
+                liftingParams.currentPose.translation() += saturatedChange;
+                tauCmd = cartesianController(q, dq, liftingParams.currentPose.translation() , liftingParams.liftingGoalPose.linear(), Eigen::Vector3d::Zero(), jacobian, T_EE_0);
+                tauCmd += coriolis;
+                std::array<double, 7> tau_d_array{};
+                Eigen::VectorXd::Map(&tau_d_array[0], 7) = tauCmd;
+                return tau_d_array;
 
-
+            }
+            case LiftingSubState::DropOff: {
+                if (workerFinished.load(std::memory_order_acquire)) {
+                    workerThread_.join();
+                    liftingParams.subState = LiftingSubState::PlacementUp;
+                    q_base = q;
+                    liftingParams.liftingGoalPose.translation() = DROP_OFF_POSITION;
+                    liftingParams.liftingGoalPose.translation()(2) = LIFT_HEIGHT;
+                    return maintain_base_pos();
+                }
+                return maintain_base_pos();
+            }
+            case LiftingSubState::PlacementUp: {
+                if ((liftingParams.currentPose.translation() - liftingParams.liftingGoalPose.translation()).norm() <= sqrt(3 * pow(0.005, 2))) {
+                    throw runtime_error("Done");
+                    return maintain_base_pos();
+                }
+                Eigen::Vector3d saturatedChange  = liftingParams.liftingGoalPose.translation() - liftingParams.currentPose.translation();
+                saturatedChange = saturatedChange.cwiseMin(MAX_CARTESIAN_DISPLACEMENT);
+                saturatedChange = saturatedChange.cwiseMax(- MAX_CARTESIAN_DISPLACEMENT);
+                liftingParams.currentPose.translation() += saturatedChange;
+                tauCmd = cartesianController(q, dq, liftingParams.currentPose.translation() , liftingParams.liftingGoalPose.linear(), Eigen::Vector3d::Zero(), jacobian, T_EE_0);
+                tauCmd += coriolis;
+                std::array<double, 7> tau_d_array{};
+                Eigen::VectorXd::Map(&tau_d_array[0], 7) = tauCmd;
+                return tau_d_array;
+            }
         }
 
         tauCmd += coriolis;
@@ -1030,13 +1116,7 @@ private:
 
     }
 
-       void handleMissingFrame() {
-        missingFrames++;
-        if (missingFrames >maxMissingFrames) {
-            cout << "Too many missing frames, transitioning to Error Recovery.\n";
-            state = State::ErrorRecovery;
-        }
-    }
+  
  
 };
 
@@ -1053,11 +1133,12 @@ int main(int argc, char ** argv) {
     robot.automaticErrorRecovery();
     franka::Model model = robot.loadModel();
     double time = 0.0;
-    franka::RobotState initial_state = robot.readOnce();;
+    franka::RobotState initial_state = robot.readOnce();
+    Eigen::Map<const Eigen::Matrix<double, 7, 1>> q_init(initial_state.q.data());
     franka::Gripper gripper(argv[1]);
-    StateController controller(model, gripper, 600, 120);
+    StateController controller(model, gripper, 600, 120, q_init);
     
-    //gripper.homing();
+    gripper.homing();
     //gripper.grasp(0.005, 0.1, 5, 0.08, 0.08);
     //cout << "done" << endl;
     //gripper.move(0.08, 0.1);
@@ -1154,9 +1235,6 @@ int main(int argc, char ** argv) {
     //adjustComputeThreadPriority(camera_data_receiver_worker);
 
     
-    //shit
-    Eigen::Map<const Eigen::Matrix<double, 7, 1>> q_init(initial_state.q.data());
-         
    Eigen::Matrix4d O_ee_0(Eigen::Matrix4d::Map(initial_state.O_T_EE.data()));
     Eigen::Matrix4d F_T_EE(Eigen::Matrix4d::Map(initial_state.F_T_EE.data()));
      cout << F_T_EE << endl << endl;
@@ -1180,3 +1258,4 @@ int main(int argc, char ** argv) {
 
     return 0;
 }
+
