@@ -389,9 +389,7 @@ public:
        }
     }
     Eigen::Matrix<double, 7, 1> q_base;
-    Eigen::Vector3d testP;
-    Eigen::Matrix3d testO; 
-
+ 
 private:
     int maxMissingFrames;
     int observationWindow;
@@ -1136,12 +1134,9 @@ int main(int argc, char ** argv) {
     franka::RobotState initial_state = robot.readOnce();
     Eigen::Map<const Eigen::Matrix<double, 7, 1>> q_init(initial_state.q.data());
     franka::Gripper gripper(argv[1]);
-    StateController controller(model, gripper, 600, 120, q_init);
-    
+    StateController controller(model, gripper, 600, 120, q_init);  
     gripper.homing();
-    //gripper.grasp(0.005, 0.1, 5, 0.08, 0.08);
-    //cout << "done" << endl;
-    //gripper.move(0.08, 0.1);
+  
 
     //Sockets set up
     zmq::context_t ctx(1);
@@ -1162,13 +1157,11 @@ int main(int argc, char ** argv) {
     auto realsense_callback = [&socket, &frameNumber, &start](const rs2::frame& frame) {
             rs2::frameset fs = frame.as<rs2::frameset>();
             if(!fs) {
-                cout << "no fs" << endl;
                 return;
             }
             rs2::video_frame cur_frame = fs.get_color_frame();
             rs2::depth_frame dframe = fs.get_depth_frame();
             if(!cur_frame || !dframe) {
-                cout << "no rgbd" << endl;   
                 return;
             }
             rs2::video_frame video_frame = cur_frame.as<rs2::video_frame>();
@@ -1196,7 +1189,6 @@ int main(int argc, char ** argv) {
             std::memcpy(msg_timestamp.data(), &timestamp_ns, sizeof(timestamp_ns));
                 
             chrono::duration<double> duration = now - start;
-            //cout << "FN " << frameNumber << " " << duration.count() << endl;
             zmq::message_t msgFrameNumber(sizeof(frameNumber));
             std::memcpy(msgFrameNumber.data(), &frameNumber, sizeof(frameNumber));
 
@@ -1231,20 +1223,7 @@ int main(int argc, char ** argv) {
     //Start reciever thread
     thread camera_data_receiver_worker(camera_data_receiver, ref(ctx));
     
-    
-    //adjustComputeThreadPriority(camera_data_receiver_worker);
-
-    
-   Eigen::Matrix4d O_ee_0(Eigen::Matrix4d::Map(initial_state.O_T_EE.data()));
-    Eigen::Matrix4d F_T_EE(Eigen::Matrix4d::Map(initial_state.F_T_EE.data()));
-     cout << F_T_EE << endl << endl;
-     cout << O_ee_0 * F_T_EE.inverse() << endl << endl;
-    cout << O_ee_0 << endl << endl;
-     
-     cout <<"AAAA" <<endl;
     controller.q_base = q_init; 
-    controller.testP = O_ee_0.topRightCorner<3,1>()+ Eigen::Vector3d(0, 0, 0.1);
-    controller.testO = O_ee_0.topLeftCorner<3,3>();
     auto control_callback = [&](const franka::RobotState& robot_state,
                                       franka::Duration period) -> franka::Torques {
         time += period.toSec();
