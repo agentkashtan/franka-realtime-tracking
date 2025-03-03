@@ -320,7 +320,7 @@ public:
             Kd.diagonal() << 20, 20, 20, 20, 20, 20, 8;
             
             CONVEYOR_BELT_SPEED << -0.04633, 0.0, 0.0;
-            OFFSET << 0.0, 0, 0.3;   
+            OFFSET << 0.0, 0, 0.25;   
             GRASPING_TRANSFORMATION << 0, 1, 0,
                                       -1, 0, 0,
                                       0, 0, 1;
@@ -345,7 +345,7 @@ public:
     array<double, 7> update(double time, franka::RobotState robotState) {
        time_stamp = time;
        robot_state = robotState;
-        
+/*        
        array<double, 42> jacobianArray = model.zeroJacobian(franka::Frame::kEndEffector, robot_state);
        array<double, 49> massArray = model.mass(robot_state);
        array<double, 7> coriolisArray = model.coriolis(robot_state);
@@ -360,6 +360,20 @@ public:
        M_ = M;
        jacobian_ = jacobian;
        coriolis_ = coriolis; 
+  */     
+           const auto& jacobianArray = model.zeroJacobian(franka::Frame::kEndEffector, robot_state);
+    const auto& massArray = model.mass(robot_state);
+    const auto& coriolisArray = model.coriolis(robot_state);
+
+    // Directly map instead of assigning to temporary Eigen objects
+    jacobian_ = Eigen::Map<const Eigen::Matrix<double, 6, 7>>(jacobianArray.data());
+    M_ = Eigen::Map<const Eigen::Matrix<double, 7, 7>>(massArray.data());
+    coriolis_ = Eigen::Map<const Eigen::Matrix<double, 7, 1>>(coriolisArray.data());
+    q_ = Eigen::Map<const Eigen::Matrix<double, 7, 1>>(robot_state.q.data());
+    dq_ = Eigen::Map<const Eigen::Matrix<double, 7, 1>>(robot_state.dq.data());
+
+
+
 
        switch (state) {
             case State::Idle:
@@ -747,7 +761,7 @@ private:
              if (time_stamp >= visualServoingParams.startTime + 1) visualServoingParams.subState = VisualServoingSubState::Approaching;
              offset = OFFSET;
         } else {
-            double lambda_ = min(1.0,  (time_stamp - visualServoingParams.startTime - 1) / 3.0);
+            double lambda_ = min(1.0,  (time_stamp - visualServoingParams.startTime - 1) / 2.0);
             offset = lambda_ * GRASP_OFFSET + (1 - lambda_) * OFFSET;
             
             if (visualServoingParams.subState == VisualServoingSubState::Approaching) {

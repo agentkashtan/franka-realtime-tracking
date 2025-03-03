@@ -113,8 +113,8 @@ find_package(cppzmq REQUIRED)
 
 
 
-add_executable(state_controller state_controller.cpp kalman/kalman.cpp opt/trajectory_generator.cpp) 
-target_include_directories(state_controller PRIVATE ${CMAKE_SOURCE_DIR}/kalman ${CMAKE_SOURCE_DIR}/opt)
+add_executable(state_controller state_controller.cpp kalman/kalman.cpp trajectory_generator/trajectory_generator.cpp) 
+target_include_directories(state_controller PRIVATE ${CMAKE_SOURCE_DIR}/kalman ${CMAKE_SOURCE_DIR}/trajectory_generator)
 
 
 target_link_libraries(state_controller PRIVATE cppzmq ${OpenCV_LIBS} opencv_highgui pinocchio::pinocchio Eigen3::Eigen Franka::Franka realsense2::realsense2  ${CASADI_LIBRARIES} Eigen3::Eigen ipopt)
