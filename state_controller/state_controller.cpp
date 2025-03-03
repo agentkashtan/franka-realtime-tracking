@@ -124,19 +124,15 @@ class RingBuffer {
         void push_back(StateEntry entry) {
             data_[end_] = entry;
             if (full_) start_ = (start_ + 1) % capacity_;
-            //cout << entry.timestamp << " " << start_ << " " << end_ << " " << full_ << endl;
-
             end_ = (end_ + 1) % capacity_;
             full_ = (end_ == start_);
         }
 
         StateEntry get_state(double ts) {
             int i = end_ - 1;
-            //cout << "size " << data_.size() << " "  << ts << endl ;
             if (!full_) {
                 while (i >= start_) {
                     if (data_[i].timestamp <= ts) {
-                        //cout <<"not full " << i  << endl;
                         return data_[i];
                     }
                     i --;
@@ -145,7 +141,6 @@ class RingBuffer {
             }
             while (i >= 0) {
                 if (data_[i].timestamp <= ts) { 
-                    //cout << "full n " << i << endl;
                     return data_[i];
                 }
                 i --;
@@ -153,7 +148,6 @@ class RingBuffer {
             i = capacity_ - 1;
             while (i >= start_) {
                 if (data_[i].timestamp <= ts) {
-                    //cout << "full c " << i << endl;
                     return data_[i];
                 }
                 i --;
@@ -254,6 +248,10 @@ struct VisualServoingParams {
     MovementEstimator* estimator;
     RingBuffer* ringBuffer;
     VisualServoingSubState subState;
+    double newData;
+    Eigen::Vector3d previousAcceleration;
+    double newDataTimestamp;
+    vector<Eigen::VectorXd> coeffs;
 };
 
 struct LiftingParams {
@@ -306,7 +304,6 @@ public:
         : gripper_(gripper),
           model(model),
           state(State::Idle),
-          missingFrames(0),
           q_base(qInit) {
             log_ik_ = std::ofstream("/dev/shm/ik.log");
 	        log_ = std::ofstream("/dev/shm/controller.log");
@@ -327,6 +324,7 @@ public:
             GRASPING_TRANSFORMATION << 0, 1, 0,
                                       -1, 0, 0,
                                       0, 0, 1;
+            GRASP_OFFSET << 0, 0, 0.1;
             LIFT_HEIGHT = 0.4;
             DROP_OFF_POSITION << 0.55, -0.1, 0; 
             OBJECT_BOTTOM_TO_CENTRE = 0.075;
@@ -343,8 +341,6 @@ public:
         std::chrono::duration<double> duration = end - start;
         return duration.count();
     }
-
-
 
     array<double, 7> update(double time, franka::RobotState robotState) {
         time_stamp = time;
@@ -384,6 +380,7 @@ private:
     Eigen::Vector3d CONVEYOR_BELT_SPEED;
     Eigen::Matrix3d GRASPING_ORIENTATION;
     Eigen::Matrix3d GRASPING_TRANSFORMATION;
+    Eigen::Vector3d GRASP_OFFSET;
     Eigen::Vector3d DROP_OFF_POSITION;
     double LIFT_HEIGHT;
     double OBJECT_BOTTOM_TO_CENTRE;
@@ -429,7 +426,6 @@ private:
         }
     }
 
-    
     array<double, 7> maintain_base_pos() {
         array<double, 7> coriolisArray = model.coriolis(robot_state);
         Eigen::Map<const Eigen::Matrix<double, 7, 1>> coriolis(coriolisArray.data());
@@ -439,43 +435,6 @@ private:
         std::array<double, 7> tauDArray{};
         Eigen::VectorXd::Map(&tauDArray[0], 7) = tauCmd;
         return tauDArray;
-    }
-
-    Eigen::VectorXd cartesianControllerOld(Eigen::VectorXd q, Eigen::VectorXd dq, Eigen::Vector3d position_d, Eigen::Matrix3d orientation_d, Eigen::Vector3d obj_velocity, Eigen::Matrix<double, 6, 7>jacobian, Eigen::Matrix4d T_ee_0, bool enableFF=false) {
-        Eigen::MatrixXd w = Eigen::MatrixXd::Identity(7, 7);
-        const double translational_stiffness{300.0};
-        const double rotational_stiffness{50.0};
-        Eigen::MatrixXd stiffness(6, 6), damping(6, 6), integral(6, 6);
-        stiffness.setZero();
-        stiffness.topLeftCorner(3, 3) << translational_stiffness * Eigen::MatrixXd::Identity(3, 3);
-        stiffness.bottomRightCorner(3, 3) << rotational_stiffness * Eigen::MatrixXd::Identity(3, 3);
-        damping.setZero();
-        damping.topLeftCorner(3, 3) << 2.0 * sqrt(translational_stiffness) *
-                                           Eigen::MatrixXd::Identity(3, 3);
-        damping.bottomRightCorner(3, 3) << 2.0 * sqrt(rotational_stiffness) *
-                                               Eigen::MatrixXd::Identity(3, 3);
-        
-        Eigen::DiagonalMatrix<double, 6> Kp_ts(300, 300, 300, 30, 30, 30);
-        Eigen::DiagonalMatrix<double, 7> Kd(20, 20, 20, 20, 20, 20, 8);
-
-        Eigen::Vector3d error_pos = position_d - T_ee_0.topRightCorner<3,1>();
-        Eigen::Matrix3d r_diff = orientation_d * T_ee_0.topLeftCorner<3,3>().transpose();
-        Eigen::AngleAxisd angle_axis(r_diff);
-        Eigen::Vector3d error_orient = angle_axis.axis() * angle_axis.angle();
-
-        Eigen::VectorXd error_p(6);
-        error_p.head(3) = error_pos;
-        error_p.tail(3) = error_orient;
-
-        Eigen::VectorXd q_dot_des_ts = Eigen::VectorXd::Zero(6);
-        q_dot_des_ts.head(3) = obj_velocity;
-        
-        Eigen::VectorXd q_dot_des_js = w.inverse() * jacobian.transpose() * (jacobian * w.inverse() * jacobian.transpose()).inverse() * q_dot_des_ts;
-       
-        Eigen::VectorXd tau(7); 
-  
-        tau = jacobian.transpose() * ( stiffness * error_p + damping * jacobian * (q_dot_des_js - dq));
-        return tau;
     }
 
     Eigen::VectorXd cartesianController(Eigen::Vector3d positionD, Eigen::Matrix3d orientationD, Eigen::Vector3d objectVelocity, Eigen::Vector3d accelerationD = Eigen::Vector3d::Zero()) {
@@ -531,7 +490,6 @@ private:
         std::lock_guard<std::mutex> lock(cameraDataMutex);
         if (cameraData.new_data && cameraData.detected) {
             cameraData.new_data = false;
-            cout << "First frame: " << cameraData.frameNumber << endl;
             Eigen::Matrix4d T_EE_0(Eigen::Matrix4d::Map(robot_state.O_T_EE.data()));
             regParams = { time_stamp, T_EE_0.topRightCorner<3,1>(), T_EE_0.topLeftCorner<3,3>() };
             state = State::Registration;
@@ -547,17 +505,13 @@ private:
             Eigen::Map<const Eigen::Matrix<double, 7, 1>> q(robot_state.q.data());
             Eigen::Matrix4d T_EE_0(Eigen::Matrix4d::Map(robot_state.O_T_EE.data()));
             q_base = q;
-           
             Eigen::VectorXd tauCmd;
-            
             tauCmd = cartesianController(regParams.init_position + (time_stamp - regParams.start_time) * CONVEYOR_BELT_SPEED, regParams.init_orientation, CONVEYOR_BELT_SPEED);
             tauCmd += coriolis;
             std::array<double, 7> tau_d_array{};
             Eigen::VectorXd::Map(&tau_d_array[0], 7) = tauCmd;
             return tau_d_array;
         } else {
-            cout << "compesnation time: " << time_stamp - regParams.start_time;
-            cout << "Second frame: " << cameraData.frameNumber << endl;
             Eigen::Map<const Eigen::Matrix<double, 7, 1>> q(robot_state.q.data());
             q_base = q;
             convert_to_global(cameraData);
@@ -569,18 +523,12 @@ private:
    
     thread computeApproachConfig_thread_; 
     void computeApproachTrajectory(int n, Eigen::Isometry3d objectPose, Eigen::Matrix4d T_EE_0, Eigen::VectorXd q)  {
-        cout << "strated comp thread" << endl;
         try { 
             apResult.finished.store(false);
             log_ << time() << " started computiotions" << endl;
             auto startComp = chrono::high_resolution_clock::now();
             double intersectTime = feasibleMinTime(objectPose.translation(), CONVEYOR_BELT_SPEED, T_EE_0.topRightCorner<3,1>(), MAX_CARTESIAN_VELOCITY);
 
-                //4.83118;//feasibleMinTime(objectPose.translation(), CONVEYOR_BELT_SPEED, T_EE_0.topRightCorner<3,1>(), MAX_CARTESIAN_VELOCITY);
-            //cout << "reachtime " << reachTime << endl;
-            //cout << "obj " << objectPose.translation().transpose() << endl;
-            //cout << "robor " << T_EE_0.topRightCorner<3,1>().transpose() << endl;
-            
             vector<Eigen::VectorXd> jointWaypoints = generate_joint_waypoint(
                     N, 
                     intersectTime,
@@ -590,24 +538,6 @@ private:
                     OFFSET,
                     GRASPING_TRANSFORMATION
                     );
-            cout << "debug data"<< endl;
-            
-            log_ << time() << " pregen" << endl;
-            /*
-            Eigen::Isometry3d testobj;
-                testobj.translation() = Eigen::Vector3d(0.766897,  -0.522604, -0.0341329);
-                Eigen::VectorXd testconfig(7);
-                testconfig << -0.463119, 0.00117603 , -0.600473,   -1.75616 ,  0.199755  ,  1.83604 , -0.281126;
-                std::vector<Eigen::VectorXd>  jointWaypoints = generate_joint_waypoint(
-                20,
-                4.83118,
-                testobj,
-                Eigen::Vector3d(-0.1, 0.0, 0.0),
-                q,
-                Eigen::Vector3d(0.0, 0.0, 0.15)
-                );
-            */
-            log_ << time() << " postgen" << endl;
             auto endComp = chrono::high_resolution_clock::now();
             chrono::duration<double> computationTime = endComp - startComp;
             double reachTime = intersectTime - computationTime.count();    
@@ -650,8 +580,7 @@ private:
                 }
                 spline[i] = localSpline;
             }
-            log_ << time() <<  " modyfing" <<endl;
-
+            
             {
                 std::lock_guard<std::mutex> lock(apResult.apResultMutex);
                 apResult.reachTime = reachTime;
@@ -662,33 +591,26 @@ private:
             }
             
             apResult.finished.store(true);
-            log_ << time() <<  " computed" <<endl;
         } catch (exception const & ex ) {
             cerr << "compute_approach_point_mth catch ex: " << ex.what() << endl;
         }
     }
 
-
     void startApproachPointComputationPhase(Eigen::Isometry3d objectPose) {
-        cout <<"started computing" << endl;
         apResult.finished.store(false);
         Eigen::Matrix4d T_EE_0(Eigen::Matrix4d::Map(robot_state.O_T_EE.data()));
         Eigen::Map<const Eigen::Matrix<double, 7, 1>> q(robot_state.q.data());
         GRASPING_ORIENTATION = objectPose.linear() * GRASPING_TRANSFORMATION;
-        cout << objectPose.linear() << endl;
         computeApproachConfig_thread_ = std::thread(&StateController::computeApproachTrajectory, this, N, objectPose, T_EE_0, q);
         adjustComputeThreadPriority(computeApproachConfig_thread_);
         state = State::ComputingApproachPoint;
     }
     
-    array<double, 7> processApproachPointComputationPhase() {
-        
-        log_ << time() << "waiting" << " " << apResult.finished.load()  << endl;
+    array<double, 7> processApproachPointComputationPhase() {        
         if (apResult.finished.load()) {
             lock_guard<std::mutex> lock(apResult.apResultMutex);
             approachParams = {time_stamp, apResult.reachTime, apResult.spline, 0, apResult.intervalDuration, apResult.predictedObjectPose};
             state = State::Approaching;
-            cout <<"Switchig to appracoging" << endl;
         }
         return maintain_base_pos();
     }     
@@ -715,7 +637,6 @@ private:
          if (approachParams.intervalNumber >= N - 1) {
             q_base = q;
             state = State::VisualServoing;
-            cout << "pre" ;
             visualServoingParams = { 
                 time_stamp, 
                 time_stamp, 
@@ -723,9 +644,12 @@ private:
                 approachParams.predictedObjectPose.linear(), 
                 nullptr,
                 new RingBuffer(500),
-                VisualServoingSubState::Following
+                VisualServoingSubState::Following,
+                false,
+                Eigen::Vector3d::Zero(),
+                0,
+                vector<Eigen::VectorXd>()
             };
-            cout << "post";
             std::lock_guard<std::mutex> lock(cameraDataMutex);
             cameraData.new_data = false;
             return maintain_base_pos();
@@ -750,7 +674,6 @@ private:
          return tau_d_array;
     }
     
-    Eigen::Vector3d real;
     thread workerThread_;
     void graspObject() {
         workerFinished.store(false, std::memory_order_release);
@@ -758,21 +681,14 @@ private:
         workerFinished.store(true, std::memory_order_release);
     }
 
-    double newData = false;
-    Eigen::Vector3d previousAcc;
-    Eigen::Vector3d previousVel;
-
-    double newDataTime = 0;
-    vector<Eigen::VectorXd> coeffs;
-
     array<double, 7> processVisualServoing() {
         Eigen::Vector3d pose;
         std::lock_guard<std::mutex> lock(cameraDataMutex);
         convert_to_global(cameraData);
 	    if (cameraData.new_data) {
             cameraData.new_data = false;
-            newData = true;
-            newDataTime = time_stamp;
+            visualServoingParams.newData = true;
+            visualServoingParams.newDataTimestamp = time_stamp;
             if (visualServoingParams.estimator == nullptr) {
                 visualServoingParams.previousTimeStamp = time_stamp; 
                 Eigen::MatrixXd P = Eigen::MatrixXd::Identity(6, 6) * 0.02;
@@ -782,8 +698,7 @@ private:
                 kalmanFilterInitialState.tail(3) = CONVEYOR_BELT_SPEED;
                 visualServoingParams.estimator = new MovementEstimator(kalmanFilterInitialState, time_stamp, P);
                 visualServoingParams.ringBuffer->push_back({time_stamp, kalmanFilterInitialState, P});
-                previousAcc.setZero();
-                previousVel.setZero();
+                visualServoingParams.previousAcceleration.setZero();
                 return maintain_base_pos();
             }
 
@@ -792,23 +707,16 @@ private:
             
             const StateEntry& pastState = visualServoingParams.ringBuffer->get_state(time_stamp - duration.count());
             visualServoingParams.estimator->set_state(pastState.state, pastState.P, time_stamp - duration.count()); 
-            visualServoingParams.estimator->correct(cameraData.pose.translation());// + CONVEYOR_BELT_SPEED * cameraData.processTime);
+            visualServoingParams.estimator->correct(cameraData.pose.translation());
 
             Eigen::Quaterniond currentObjOrientaionQ(visualServoingParams.filteredObjectOrientation);
             Eigen::Quaterniond measuredObjOrientaionQ(cameraData.pose.linear());
             visualServoingParams.filteredObjectOrientation = currentObjOrientaionQ.slerp(0.1, measuredObjOrientaionQ).toRotationMatrix();    
 
-            //visualServoingParams.desiredOrientation = GRASPING_ORIENTATION;
             std::chrono::duration<double> test = cameraData.processTime -  start;
-             
-            real <<  cameraData.pose.translation() ;
-            string real_time = to_string(test.count());
-            log_vs_ << real_time << " " << real.transpose() << endl;
-            log_ad_ << time() << " " << real.transpose() << endl;
         }
-        //cout << "vs idle" << endl;
+       
         if (visualServoingParams.estimator == nullptr) return maintain_base_pos();
-        //cout << "actual vs" << endl;
           
         // Kalman filter
         visualServoingParams.estimator->predict(time_stamp);
@@ -825,7 +733,6 @@ private:
 
         // Low pass filter
         double alpha = 0.1;
-        Eigen::Vector3d previousState = visualServoingParams.filteredObjectPosition;
         visualServoingParams.filteredObjectPosition += alpha * ( saturedObjectPosition - visualServoingParams.filteredObjectPosition);
 
         Eigen::Vector3d objectVelocity = estimatedObjectData.tail(3); 
@@ -839,14 +746,15 @@ private:
         Eigen::Matrix4d T_EE_0(Eigen::Matrix4d::Map(robot_state.O_T_EE.data()));
         Eigen::VectorXd tauCmd;
         log_rp_ << time() << " " <<  T_EE_0.topRightCorner<3,1>().transpose() << endl;
-        
         Eigen::Vector3d offset;
+
+
         if (visualServoingParams.subState == VisualServoingSubState::Following){
              if (time_stamp >= visualServoingParams.startTime + 1) visualServoingParams.subState = VisualServoingSubState::Approaching;
              offset = OFFSET;
         } else {
             double lambda_ = min(1.0,  (time_stamp - visualServoingParams.startTime - 1) / 3.0);
-            offset = lambda_ * Eigen::Vector3d(0, 0, 0.1) + (1 - lambda_) * OFFSET;
+            offset = lambda_ * GRASP_OFFSET + (1 - lambda_) * OFFSET;
             
             if (visualServoingParams.subState == VisualServoingSubState::Approaching) {
                 if (lambda_ == 1) {
@@ -870,15 +778,15 @@ private:
             }
             
         }  
+        
         log_vs_rp_ << time() << " " << (visualServoingParams.filteredObjectPosition + offset).transpose() << "  " << objectVelocity.transpose() << endl; 
         
         double predictionTimeDelta = 0.2;
-        if (newData) {
-            newData = false;
+        if (visualServoingParams.newData) {
+            visualServoingParams.newData = false;
             array<double, 42> jacobianArray = model.zeroJacobian(franka::Frame::kEndEffector, robot_state);
             Eigen::Map<const Eigen::Matrix<double, 6, 7>> jacobian(jacobianArray.data());
-
-            coeffs = vector<Eigen::VectorXd>(3);
+            visualServoingParams.coeffs = vector<Eigen::VectorXd>(3);
             Eigen::Vector3d predictedObjectPosition = visualServoingParams.filteredObjectPosition + predictionTimeDelta * objectVelocity + offset; 
             for (int i = 0; i < 3; i ++) {
                 Eigen::Matrix<double, 6, 6> A;
@@ -889,33 +797,34 @@ private:
                     20.0*pow(0, 3),12.0*pow(0, 2), 6.0*0,         2.0,         0.0, 0.0,
                     20.0*pow(predictionTimeDelta, 3),12.0*pow(predictionTimeDelta, 2),6.0*predictionTimeDelta,         2.0,         0,0;
                 Eigen::Matrix<double, 6, 1> B;
-                B << T_EE_0.topRightCorner<3,1>()(i), predictedObjectPosition(i), (jacobian * dq)(i), objectVelocity(i), previousAcc(i), 0;
-                coeffs[i] = A.fullPivLu().solve(B);
+                B << T_EE_0.topRightCorner<3,1>()(i), predictedObjectPosition(i), (jacobian * dq)(i), objectVelocity(i), visualServoingParams.previousAcceleration(i), 0;
+                visualServoingParams.coeffs[i] = A.fullPivLu().solve(B);
                }
-            newDataTime = time_stamp;
+            visualServoingParams.newDataTimestamp = time_stamp;
         }
 
         Eigen::Vector3d controllerInputPosition;
         Eigen::Vector3d controllerInputVelocity;
         Eigen::Vector3d controllerInputAcceleration;
 
-        if (time_stamp - newDataTime > predictionTimeDelta){
+        if (time_stamp - visualServoingParams.newDataTimestamp > predictionTimeDelta){
             controllerInputPosition = visualServoingParams.filteredObjectPosition + offset;
             controllerInputVelocity = objectVelocity;
             controllerInputAcceleration.setZero();
         } else {
-            double nextStep = time_stamp - newDataTime;
+            double nextStep = time_stamp - visualServoingParams.newDataTimestamp;
+            vector<Eigen::VectorXd> c = visualServoingParams.coeffs;
             for (int i =0; i < 3; i ++) {
-                controllerInputPosition(i) = coeffs[i](0) * pow(nextStep, 5) + coeffs[i](1) * pow(nextStep, 4) + coeffs[i](2) * pow(nextStep, 3) + coeffs[i](3) * pow(nextStep, 2) + coeffs[i](4) * nextStep + coeffs[i](5);
-                controllerInputVelocity(i) = 5 * coeffs[i](0) * pow(nextStep, 4) + 4 * coeffs[i](1) * pow(nextStep, 3) + 3 * coeffs[i](2) * pow(nextStep, 2) + 2 * coeffs[i](3) * nextStep  + coeffs[i](4);
-                controllerInputAcceleration(i) = 20 * coeffs[i](0) * pow(nextStep, 3) + 12 * coeffs[i](1) * pow(nextStep, 2) + 6 * coeffs[i](2) * nextStep + 2 * coeffs[i](3);
+                controllerInputPosition(i) = c[i](0) * pow(nextStep, 5) + c[i](1) * pow(nextStep, 4) + c[i](2) * pow(nextStep, 3) + c[i](3) * pow(nextStep, 2) + c[i](4) * nextStep + c[i](5);
+                controllerInputVelocity(i) = 5 * c[i](0) * pow(nextStep, 4) + 4 * c[i](1) * pow(nextStep, 3) + 3 * c[i](2) * pow(nextStep, 2) + 2 * c[i](3) * nextStep  + c[i](4);
+                controllerInputAcceleration(i) = 20 * c[i](0) * pow(nextStep, 3) + 12 * c[i](1) * pow(nextStep, 2) + 6 * c[i](2) * nextStep + 2 * c[i](3);
             }
         }
  
         log_pp_ << time() << " "  <<  controllerInputPosition.transpose()  << endl;
 
         tauCmd = cartesianController(controllerInputPosition, visualServoingParams.filteredObjectOrientation * GRASPING_TRANSFORMATION, controllerInputVelocity,  controllerInputAcceleration);
-        previousAcc = controllerInputAcceleration;
+        visualServoingParams.previousAcceleration = controllerInputAcceleration;
         tauCmd += coriolis;
         std::array<double, 7> tau_d_array{};
         Eigen::VectorXd::Map(&tau_d_array[0], 7) = tauCmd;
@@ -984,7 +893,7 @@ private:
                     double transportExecutionTime = (T_EE_0.topRightCorner<3, 1>() - desiredTransportPosition).norm() / 0.075;
                     double finalTime = time_stamp + transportExecutionTime; 
                     lock_guard<mutex> lock(workerMutex);
-                    coeffs = vector<Eigen::VectorXd>(7);
+                    vector<Eigen::VectorXd> coeffs(7);
                     for (int i = 0; i < 7; i ++) {
                         Eigen::Matrix<double, 6, 6> A;
                         A <<  pow(time_stamp, 5),     pow(time_stamp, 4),     pow(time_stamp, 3),     pow(time_stamp, 2),  time_stamp, 1.0,
