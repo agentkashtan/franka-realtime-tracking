@@ -1,17 +1,6 @@
-#include "pinocchio/parsers/urdf.hpp"
-#include "pinocchio/algorithm/jacobian.hpp"
-#include "pinocchio/algorithm/joint-configuration.hpp"
-#include "pinocchio/algorithm/kinematics.hpp"
-#include "pinocchio/algorithm/crba.hpp"
-#include "pinocchio/algorithm/compute-all-terms.hpp"
-#include <Eigen/Dense>
-#include "franka_ik_He.hpp"
-#include <cmath>  // for M_PI
-#include "pinocchio/fwd.hpp"
-#include "pinocchio/multibody/model.hpp"
-#include "pinocchio/multibody/data.hpp"
 
-#include "pinocchio/algorithm/frames.hpp"
+#include <Eigen/Dense>
+#include <cmath>  // for M_PI
 
 #include <iostream>
 #include <array>
@@ -1119,12 +1108,7 @@ private:
 };
 
 int main(int argc, char ** argv) {
-    using namespace pinocchio;
-
     // Robot set up
-
-    if(!getenv("URDF"))throw std::runtime_error("no URDF env");
-    const string urdf_filename = getenv("URDF");
     Eigen::VectorXd q_test_init(7);
     q_test_init << 1.4784838,   0.58908088, -1.51156758, -2.32406426,  0.75959274,  2.20523463, -2.89;
     franka::Robot robot(argv[1]);
