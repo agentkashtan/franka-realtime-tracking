@@ -1,0 +1,1 @@
+/usr/bin/g++ -Wall -Wextra -pthread -O3  -Wl,-rpath -Wl,/home/robohub/visual_servoing/state_controller/opt/build CMakeFiles/trajectory_generator.dir/trajectory_generator.cpp.o -o trajectory_generator   -L/usr/local/lib  -Wl,-rpath,/usr/local/lib /usr/local/lib/libcasadi.so -lipopt 

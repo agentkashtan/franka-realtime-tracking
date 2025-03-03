@@ -1,0 +1,3 @@
+/home/robohub/visual_servoing/state_controller/opt/build/CMakeFiles/trajectory_generator.dir
+/home/robohub/visual_servoing/state_controller/opt/build/CMakeFiles/edit_cache.dir
+/home/robohub/visual_servoing/state_controller/opt/build/CMakeFiles/rebuild_cache.dir
