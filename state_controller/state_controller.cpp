@@ -83,9 +83,7 @@ void camera_data_receiver(zmq::context_t& ctx) {
         memcpy(&timestamp_ns, msg_timestamp.data(), sizeof(timestamp_ns));
 	    auto now = chrono::high_resolution_clock::now();
         auto start = chrono::time_point<chrono::high_resolution_clock>(chrono::nanoseconds(timestamp_ns));
-	    chrono::duration<double> duration = now - start;
-	    //cout << "full cycle: " << duration.count() <<  " " << camera_T_tag.translation().transpose() << endl;
-         
+	    chrono::duration<double> duration = now - start;  
         Eigen::Isometry3d g_T_cad;
         g_T_cad.setIdentity();
         g_T_cad.linear() << 0, 1, 0,
@@ -190,12 +188,9 @@ std::mutex workerMutex;
 enum class State {
     Idle,
     Registration,
-    DoNothing,
-    Observing,
     ComputingApproachPoint,
     Approaching,
     VisualServoing,
-    ErrorRecovery,
     Lifting,
 };
 
@@ -277,7 +272,6 @@ int sgn(double a) {
  return a > 0 ? 1 : -1;
 };
 
-bool new_cam = false;
 array<double, 7> ZERO_TORQUES = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
 
 void adjustComputeThreadPriority(std::thread& compute_thread) {
@@ -308,10 +302,8 @@ void adjustComputeThreadPriority(std::thread& compute_thread) {
 
 class StateController {
 public:
-    StateController(franka::Model& model, franka::Gripper& gripper, int maxMissingFrames, int observationWindow, Eigen::VectorXd qInit)
-        : maxMissingFrames(maxMissingFrames),
-          observationWindow(observationWindow),
-          gripper_(gripper),
+    StateController(franka::Model& model, franka::Gripper& gripper,  Eigen::VectorXd qInit)
+        : gripper_(gripper),
           model(model),
           state(State::Idle),
           missingFrames(0),
@@ -354,22 +346,18 @@ public:
 
 
 
-    array<double, 7> update(double time1, franka::RobotState robotState) {
-        time_stamp = time1;
+    array<double, 7> update(double time, franka::RobotState robotState) {
+        time_stamp = time;
         robot_state = robotState;
         Eigen::Map<const Eigen::Matrix<double, 7, 1>> q(robot_state.q.data());
         switch (state) {
             case State::Idle:
 		        return processIdle();
             case State::Registration:
-                return processRegistration();
-            case State::DoNothing:
-                return maintain_base_pos(); 
+                return processRegistration(); 
             case State::ComputingApproachPoint:
-                log_ << time() << " Controller Comp"<<endl;
                 return processApproachPointComputationPhase();  
             case State::Approaching:
-                log_ << time() << " Controller App"<<endl;
                 return processApproachPhase();
             case State::VisualServoing:
                 return processVisualServoing();
@@ -380,8 +368,6 @@ public:
     Eigen::Matrix<double, 7, 1> q_base;
  
 private:
-    int maxMissingFrames;
-    int observationWindow;
     State state;
 
     std::ofstream log_;
@@ -455,7 +441,7 @@ private:
         return tauDArray;
     }
 
-    Eigen::VectorXd cartesianController(Eigen::VectorXd q, Eigen::VectorXd dq, Eigen::Vector3d position_d, Eigen::Matrix3d orientation_d, Eigen::Vector3d obj_velocity, Eigen::Matrix<double, 6, 7>jacobian, Eigen::Matrix4d T_ee_0, bool enableFF=false) {
+    Eigen::VectorXd cartesianControllerOld(Eigen::VectorXd q, Eigen::VectorXd dq, Eigen::Vector3d position_d, Eigen::Matrix3d orientation_d, Eigen::Vector3d obj_velocity, Eigen::Matrix<double, 6, 7>jacobian, Eigen::Matrix4d T_ee_0, bool enableFF=false) {
         Eigen::MatrixXd w = Eigen::MatrixXd::Identity(7, 7);
         const double translational_stiffness{300.0};
         const double rotational_stiffness{50.0};
@@ -492,8 +478,15 @@ private:
         return tau;
     }
 
-    Eigen::VectorXd cartesianControllerNew(Eigen::VectorXd q, Eigen::VectorXd dq, Eigen::Vector3d position_d, Eigen::Matrix3d orientation_d, Eigen::Vector3d obj_velocity, Eigen::Matrix<double, 6, 7>jacobian, Eigen::Matrix4d T_ee_0, Eigen::Matrix<double, 7, 7> M, Eigen::Vector3d acceleration_d) {
-        Eigen::MatrixXd w = Eigen::MatrixXd::Identity(7, 7);
+    Eigen::VectorXd cartesianController(Eigen::Vector3d positionD, Eigen::Matrix3d orientationD, Eigen::Vector3d objectVelocity, Eigen::Vector3d accelerationD = Eigen::Vector3d::Zero()) {
+        array<double, 42> jacobianArray = model.zeroJacobian(franka::Frame::kEndEffector, robot_state);
+        array<double, 49> massArray = model.mass(robot_state);
+        Eigen::Map<const Eigen::Matrix<double, 6, 7>> jacobian(jacobianArray.data());
+        Eigen::Map<const Eigen::Matrix<double, 7, 7>> M(massArray.data());
+        Eigen::Map<const Eigen::Matrix<double, 7, 1>> q(robot_state.q.data());
+        Eigen::Map<const Eigen::Matrix<double, 7, 1>> dq(robot_state.dq.data());
+        Eigen::Matrix4d T_EE_0(Eigen::Matrix4d::Map(robot_state.O_T_EE.data()));
+
         const double translational_stiffness{500.0};
         const double rotational_stiffness{50.0};
         Eigen::MatrixXd stiffness(6, 6), damping(6, 6), integral(6, 6);
@@ -509,8 +502,8 @@ private:
         Eigen::DiagonalMatrix<double, 6> Kp_ts(300, 300, 300, 30, 30, 30);
         Eigen::DiagonalMatrix<double, 7> Kd(20, 20, 20, 20, 20, 20, 8);
 
-        Eigen::Vector3d error_pos = position_d - T_ee_0.topRightCorner<3,1>();
-        Eigen::Matrix3d r_diff = orientation_d * T_ee_0.topLeftCorner<3,3>().transpose();
+        Eigen::Vector3d error_pos = positionD - T_EE_0.topRightCorner<3,1>();
+        Eigen::Matrix3d r_diff = orientationD * T_EE_0.topLeftCorner<3,3>().transpose();
         Eigen::AngleAxisd angle_axis(r_diff);
         Eigen::Vector3d error_orient = angle_axis.axis() * angle_axis.angle();
 
@@ -518,20 +511,18 @@ private:
         error_p.head(3) = error_pos;
         error_p.tail(3) = error_orient;
 
-        Eigen::VectorXd q_dot_des_ts = Eigen::VectorXd::Zero(6);
-        q_dot_des_ts.head(3) = obj_velocity;
-
-        Eigen::VectorXd q_dot_des_js = w.inverse() * jacobian.transpose() * (jacobian * w.inverse() * jacobian.transpose()).inverse() * q_dot_des_ts;
+        Eigen::VectorXd dqDesiredTaskSpace = Eigen::VectorXd::Zero(6);
+        dqDesiredTaskSpace.head(3) = objectVelocity;
 
         Eigen::VectorXd tau(7);
         Eigen::VectorXd ff(6);
         
-        Eigen::VectorXd acceleration_d_6d(6);
-        acceleration_d_6d.setZero();
-        acceleration_d_6d.head(3) = acceleration_d;
-        ff = (jacobian * M.inverse() * jacobian.transpose()).inverse() * acceleration_d_6d;
+        Eigen::VectorXd accelerationDesired6d(6);
+        accelerationDesired6d.setZero();
+        accelerationDesired6d.head(3) = accelerationD;
+        ff = (jacobian * M.inverse() * jacobian.transpose()).inverse() * accelerationDesired6d;
 
-        tau = jacobian.transpose() * ( stiffness * error_p + damping * (q_dot_des_ts - jacobian * dq) + ff);
+        tau = jacobian.transpose() * ( stiffness * error_p + damping * (dqDesiredTaskSpace - jacobian * dq) + ff);
         return tau;
     }
 
@@ -552,18 +543,14 @@ private:
         std::lock_guard<std::mutex> lock(cameraDataMutex);
         if (!cameraData.new_data) {          
             array<double, 7> coriolisArray = model.coriolis(robot_state);
-            array<double, 42> jacobian_array = model.zeroJacobian(franka::Frame::kEndEffector, robot_state);
-            
             Eigen::Map<const Eigen::Matrix<double, 7, 1>> coriolis(coriolisArray.data());
-            Eigen::Map<const Eigen::Matrix<double, 6, 7>> jacobian(jacobian_array.data());
             Eigen::Map<const Eigen::Matrix<double, 7, 1>> q(robot_state.q.data());
-            Eigen::Map<const Eigen::Matrix<double, 7, 1>> dq(robot_state.dq.data());
             Eigen::Matrix4d T_EE_0(Eigen::Matrix4d::Map(robot_state.O_T_EE.data()));
             q_base = q;
            
             Eigen::VectorXd tauCmd;
             
-            tauCmd = cartesianController(q, dq, regParams.init_position + (time_stamp - regParams.start_time) * CONVEYOR_BELT_SPEED, regParams.init_orientation, CONVEYOR_BELT_SPEED, jacobian, T_EE_0);
+            tauCmd = cartesianController(regParams.init_position + (time_stamp - regParams.start_time) * CONVEYOR_BELT_SPEED, regParams.init_orientation, CONVEYOR_BELT_SPEED);
             tauCmd += coriolis;
             std::array<double, 7> tau_d_array{};
             Eigen::VectorXd::Map(&tau_d_array[0], 7) = tauCmd;
@@ -836,26 +823,19 @@ private:
         saturedChange = saturedChange.cwiseMax(- MAX_RATE);
         Eigen::Vector3d saturedObjectPosition = visualServoingParams.filteredObjectPosition + saturedChange; 
 
-        //log_vs_ <<real.transpose() << " " << CONVEYOR_BELT_SPEED.transpose() << " " << estimatedObjectData.tail(3).transpose() << " ";
-
         // Low pass filter
         double alpha = 0.1;
         Eigen::Vector3d previousState = visualServoingParams.filteredObjectPosition;
         visualServoingParams.filteredObjectPosition += alpha * ( saturedObjectPosition - visualServoingParams.filteredObjectPosition);
 
         Eigen::Vector3d objectVelocity = estimatedObjectData.tail(3); 
-        //(visualServoingParams.filteredObjectPosition  - previousState) / (time_stamp - visualServoingParams.previousTimeStamp);
         visualServoingParams.previousTimeStamp = time_stamp;
    
-        //log_vs_ << visualServoingParams.filteredObjectPosition.transpose() <<  " ";
         array<double, 7> coriolisArray = model.coriolis(robot_state);
-        array<double, 42> jacobianArray = model.zeroJacobian(franka::Frame::kEndEffector, robot_state);
-        array<double, 49> mass_array = model.mass(robot_state);
-        Eigen::Map<const Eigen::Matrix<double, 7, 7>> mass(mass_array.data());
         Eigen::Map<const Eigen::Matrix<double, 7, 1>> coriolis(coriolisArray.data());
-        Eigen::Map<const Eigen::Matrix<double, 6, 7>> jacobian(jacobianArray.data());
         Eigen::Map<const Eigen::Matrix<double, 7, 1>> q(robot_state.q.data());
         Eigen::Map<const Eigen::Matrix<double, 7, 1>> dq(robot_state.dq.data());
+
         Eigen::Matrix4d T_EE_0(Eigen::Matrix4d::Map(robot_state.O_T_EE.data()));
         Eigen::VectorXd tauCmd;
         log_rp_ << time() << " " <<  T_EE_0.topRightCorner<3,1>().transpose() << endl;
@@ -895,6 +875,9 @@ private:
         double predictionTimeDelta = 0.2;
         if (newData) {
             newData = false;
+            array<double, 42> jacobianArray = model.zeroJacobian(franka::Frame::kEndEffector, robot_state);
+            Eigen::Map<const Eigen::Matrix<double, 6, 7>> jacobian(jacobianArray.data());
+
             coeffs = vector<Eigen::VectorXd>(3);
             Eigen::Vector3d predictedObjectPosition = visualServoingParams.filteredObjectPosition + predictionTimeDelta * objectVelocity + offset; 
             for (int i = 0; i < 3; i ++) {
@@ -931,7 +914,7 @@ private:
  
         log_pp_ << time() << " "  <<  controllerInputPosition.transpose()  << endl;
 
-        tauCmd = cartesianControllerNew(q, dq, controllerInputPosition, visualServoingParams.filteredObjectOrientation * GRASPING_TRANSFORMATION, controllerInputVelocity, jacobian, T_EE_0, mass, controllerInputAcceleration);
+        tauCmd = cartesianController(controllerInputPosition, visualServoingParams.filteredObjectOrientation * GRASPING_TRANSFORMATION, controllerInputVelocity,  controllerInputAcceleration);
         previousAcc = controllerInputAcceleration;
         tauCmd += coriolis;
         std::array<double, 7> tau_d_array{};
@@ -956,16 +939,14 @@ private:
 
     array<double, 7> processLifting() {
         array<double, 7> coriolisArray = model.coriolis(robot_state);
-        array<double, 42> jacobianArray = model.zeroJacobian(franka::Frame::kEndEffector, robot_state);
+        array<double, 49> massArray = model.mass(robot_state);
+        Eigen::Map<const Eigen::Matrix<double, 7, 7>> M(massArray.data());
         Eigen::Map<const Eigen::Matrix<double, 7, 1>> coriolis(coriolisArray.data());
-        Eigen::Map<const Eigen::Matrix<double, 6, 7>> jacobian(jacobianArray.data());
         Eigen::Map<const Eigen::Matrix<double, 7, 1>> q(robot_state.q.data());
         Eigen::Map<const Eigen::Matrix<double, 7, 1>> dq(robot_state.dq.data());
-        array<double, 49> mass_array = model.mass(robot_state);
-        Eigen::Map<const Eigen::Matrix<double, 7, 7>> mass(mass_array.data());
-
-        Eigen::Matrix4d T_EE_0(Eigen::Matrix4d::Map(robot_state.O_T_EE.data()));
         
+        Eigen::Matrix4d T_EE_0(Eigen::Matrix4d::Map(robot_state.O_T_EE.data()));
+
         double MAX_CARTESIAN_DISPLACEMENT = 0.00005;
         Eigen::VectorXd tauCmd;
         switch (liftingParams.subState) {
@@ -989,7 +970,7 @@ private:
                 saturatedChange = saturatedChange.cwiseMin(MAX_CARTESIAN_DISPLACEMENT);
                 saturatedChange = saturatedChange.cwiseMax(- MAX_CARTESIAN_DISPLACEMENT);
                 liftingParams.currentPose.translation() += saturatedChange;
-                tauCmd = cartesianController(q, dq, liftingParams.currentPose.translation() , liftingParams.liftingGoalPose.linear(), Eigen::Vector3d::Zero(), jacobian, T_EE_0);
+                tauCmd = cartesianController(liftingParams.currentPose.translation() , liftingParams.liftingGoalPose.linear(), Eigen::Vector3d::Zero());
                 tauCmd += coriolis;
                 std::array<double, 7> tau_d_array{};
                 Eigen::VectorXd::Map(&tau_d_array[0], 7) = tauCmd;
@@ -1004,7 +985,6 @@ private:
                     double finalTime = time_stamp + transportExecutionTime; 
                     lock_guard<mutex> lock(workerMutex);
                     coeffs = vector<Eigen::VectorXd>(7);
-                    cout << "config -> " <<  liftingParams.transportConfig.transpose() << endl;
                     for (int i = 0; i < 7; i ++) {
                         Eigen::Matrix<double, 6, 6> A;
                         A <<  pow(time_stamp, 5),     pow(time_stamp, 4),     pow(time_stamp, 3),     pow(time_stamp, 2),  time_stamp, 1.0,
@@ -1029,7 +1009,7 @@ private:
                     Eigen::VectorXd desiredQ = result[0];
                     Eigen::VectorXd desiredDQ = result[1];
                     Eigen::VectorXd desiredDDQ = result[2];
-                    tauCmd = Kp * (desiredQ - q) + Kd * (desiredDQ - dq) + mass * desiredDDQ;
+                    tauCmd = Kp * (desiredQ - q) + Kd * (desiredDQ - dq) + M * desiredDDQ;
                     tauCmd += coriolis;
                     std::array<double, 7> tau_d_array{};
                     Eigen::VectorXd::Map(&tau_d_array[0], 7) = tauCmd;
@@ -1047,9 +1027,7 @@ private:
                 }
              }
              case LiftingSubState::PlacementDown: {
-                cout << (liftingParams.currentPose.translation() - liftingParams.liftingGoalPose.translation()).norm() << endl; 
                 if ((liftingParams.currentPose.translation() - liftingParams.liftingGoalPose.translation()).norm() <= sqrt(3 * pow(0.005, 2))) {
-                    cout << "on the ground" << endl;
                     liftingParams.subState = LiftingSubState::DropOff;
                     q_base = q;
                     workerFinished.store(false, std::memory_order_release);
@@ -1060,7 +1038,7 @@ private:
                 saturatedChange = saturatedChange.cwiseMin(MAX_CARTESIAN_DISPLACEMENT);
                 saturatedChange = saturatedChange.cwiseMax(- MAX_CARTESIAN_DISPLACEMENT);
                 liftingParams.currentPose.translation() += saturatedChange;
-                tauCmd = cartesianController(q, dq, liftingParams.currentPose.translation() , liftingParams.liftingGoalPose.linear(), Eigen::Vector3d::Zero(), jacobian, T_EE_0);
+                tauCmd = cartesianController(liftingParams.currentPose.translation() , liftingParams.liftingGoalPose.linear(), Eigen::Vector3d::Zero());
                 tauCmd += coriolis;
                 std::array<double, 7> tau_d_array{};
                 Eigen::VectorXd::Map(&tau_d_array[0], 7) = tauCmd;
@@ -1087,7 +1065,7 @@ private:
                 saturatedChange = saturatedChange.cwiseMin(MAX_CARTESIAN_DISPLACEMENT);
                 saturatedChange = saturatedChange.cwiseMax(- MAX_CARTESIAN_DISPLACEMENT);
                 liftingParams.currentPose.translation() += saturatedChange;
-                tauCmd = cartesianController(q, dq, liftingParams.currentPose.translation() , liftingParams.liftingGoalPose.linear(), Eigen::Vector3d::Zero(), jacobian, T_EE_0);
+                tauCmd = cartesianController(liftingParams.currentPose.translation() , liftingParams.liftingGoalPose.linear(), Eigen::Vector3d::Zero());
                 tauCmd += coriolis;
                 std::array<double, 7> tau_d_array{};
                 Eigen::VectorXd::Map(&tau_d_array[0], 7) = tauCmd;
@@ -1118,7 +1096,7 @@ int main(int argc, char ** argv) {
     franka::RobotState initial_state = robot.readOnce();
     Eigen::Map<const Eigen::Matrix<double, 7, 1>> q_init(initial_state.q.data());
     franka::Gripper gripper(argv[1]);
-    StateController controller(model, gripper, 600, 120, q_init);  
+    StateController controller(model, gripper, q_init);  
     gripper.homing();
   
 
@@ -1200,7 +1178,6 @@ int main(int argc, char ** argv) {
    
     rs2::pipeline_profile profile = pipe.start(cfg, realsense_callback);
     auto intrinsics = pipe.get_active_profile().get_stream(rs2_stream::RS2_STREAM_COLOR).as<rs2::video_stream_profile>().get_intrinsics();
-    cout << intrinsics.fx << endl;
     auto depth_sensor = profile.get_device().first<rs2::depth_sensor>();
     depth_sensor.set_option(RS2_OPTION_DEPTH_UNITS, 0.001f);
     float current_depth_unit = depth_sensor.get_option(RS2_OPTION_DEPTH_UNITS);
