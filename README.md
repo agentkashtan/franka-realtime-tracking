@@ -22,10 +22,10 @@ https://github.com/user-attachments/assets/84b7e4d4-6665-42a5-86f0-c73ba519fadc
   - Uses **real-time feedback** for precise alignment.  
   - **Torque control** is managed via **libfranka**.
 
-- **Multi-Stage Operation**  
-  1. **Initial Tracking**: The robot moves to observe the object.  
-  2. **Dynamic Following**: Continuously updates its motion based on real-time pose updates.  
-  3. **Grasp Execution**: Once aligned, the robot attempts to grasp the object.
+- **Multi-Stage Operation**
+  - **Initial Approach**: Move from a safe, elevated position to a location where the object is within clear view.
+  -  **Refined Positioning**: Update the end-effector pose continuously using new 6D estimates, compensating for the object’s movement on the belt.
+  -  **Grasp and Place**: Secure the object and move it to a designated drop-off location, completing the pick-and-place cycle. 
 
 ## Repository Structure
 - **state_controller.cpp**  
