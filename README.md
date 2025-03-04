@@ -3,6 +3,13 @@
 ## Overview
 This project demonstrates a **real-time** object tracking and grasping system, built in **C++** for a **Franka Emika Panda robot**, to handle objects moving on a conveyor belt. An **Intel RealSense RGB-D** camera captures frames for **6D pose** estimation, processed by **NVIDIA FoundationPose** on a remote server. The system integrates **CasADi** for trajectory optimization, Cartesian impedance control via **libfranka**, and continuous camera feedback, with **ZeroMQ** streaming images for inference.
 
+## Demo
+
+
+https://github.com/user-attachments/assets/84b7e4d4-6665-42a5-86f0-c73ba519fadc
+
+
+
 ## Features
 - **Real-Time Visual Tracking**  
   - The **Intel RealSense D405** captures **RGB-D** images of the moving object.  
