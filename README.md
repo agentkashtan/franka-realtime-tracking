@@ -1,4 +1,4 @@
-# Real-Time Object Tracking and Following for Robotic Manipulation
+# Real-Time Tracking & Grasping of Moving Objects with a Franka Panda
 
 ## Overview
 This project demonstrates a **real-time** object tracking and grasping system, built in **C++** for a **Franka Emika Panda robot**, to handle objects moving on a conveyor belt. An **Intel RealSense RGB-D** camera captures frames for **6D pose** estimation, processed by **NVIDIA FoundationPose** on a remote server. The system integrates **CasADi** for trajectory optimization, Cartesian impedance control via **libfranka**, and continuous camera feedback, with **ZeroMQ** streaming images for inference.
