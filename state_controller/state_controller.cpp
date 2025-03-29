@@ -52,6 +52,7 @@ struct CameraData {
     bool new_data;
     int frameNumber;
     std::chrono::time_point<std::chrono::high_resolution_clock> processTime;
+    Eigen::Isometry3d o_T_g;
 };
 
 std::mutex cameraDataMutex;
@@ -64,11 +65,13 @@ void camera_data_receiver(zmq::context_t& ctx) {
 	    zmq::message_t msg;
 	    zmq::message_t msg_frameNumber;
         zmq::message_t msg_timestamp;
-        
+        zmq::message_t msg_ee_transform;
+
 	    socket_in.recv(msg, zmq::recv_flags::none);
         socket_in.recv(msg_frameNumber, zmq::recv_flags::dontwait);
 	    socket_in.recv(msg_timestamp, zmq::recv_flags::dontwait);    
-	
+	    socket_in.recv(msg_ee_transform, zmq::recv_flags::dontwait);
+
 	    vector<double> pose(6); 
 	    memcpy(pose.data(), msg.data(), 6 * sizeof(double));
 	    Eigen::Isometry3d camera_T_tag;
@@ -104,9 +107,14 @@ void camera_data_receiver(zmq::context_t& ctx) {
         cam_c_T_c.translation() << -0.009, 0, 0;
 
         Eigen::Isometry3d g_T_c =  g_T_cad * cad_T_cam_c * cam_c_T_c;
-        
+
+
+        vector<double> ee_pose(16);
+        memcpy(ee_pose.data(), msg_ee_transform.data(), 16 * sizeof(double));
+        Eigen::Matrix4d o_T_g_matrix = Eigen::Matrix4d::Map(ee_pose.data());
+        Eigen::Isometry3d o_T_g(o_T_g_matrix);
         std::lock_guard<std::mutex> lock(cameraDataMutex);
-        cameraData = { true, g_T_c * camera_T_tag, false, true, frameNumber, start };
+        cameraData = { true, g_T_c * camera_T_tag, false, true, frameNumber, start, o_T_g };
     }
 }
 
@@ -178,6 +186,12 @@ APResult apResult;
 std::atomic<bool> workerFinished{false};
 std::mutex workerMutex;
 
+struct SharedEndEffectorPose {
+    mutex mtx;
+    Eigen::Matrix4d pose;
+};
+
+SharedEndEffectorPose sharedEEPose;
 
 enum class State {
     Idle,
@@ -252,6 +266,7 @@ struct VisualServoingParams {
     Eigen::Vector3d previousAcceleration;
     double newDataTimestamp;
     vector<Eigen::VectorXd> coeffs;
+    Eigen::Vector3d offset;
 };
 
 struct LiftingParams {
@@ -319,8 +334,9 @@ public:
 	        Kp.diagonal() << 200, 200, 200, 200, 200, 200,200;
             Kd.diagonal() << 20, 20, 20, 20, 20, 20, 8;
             
-            CONVEYOR_BELT_SPEED << -0.04633, 0.0, 0.0;
-            OFFSET << 0.0, 0, 0.25;   
+            //CONVEYOR_BELT_SPEED << -0.04633, 0.0, 0.0;
+            CONVEYOR_BELT_SPEED << -0.15, 0.0, 0.0;
+            OFFSET << 0.0, 0, 0.15;   
             GRASPING_TRANSFORMATION << 0, 1, 0,
                                       -1, 0, 0,
                                       0, 0, 1;
@@ -343,39 +359,26 @@ public:
     }
 
     array<double, 7> update(double time, franka::RobotState robotState) {
-       time_stamp = time;
-       robot_state = robotState;
-/*        
-       array<double, 42> jacobianArray = model.zeroJacobian(franka::Frame::kEndEffector, robot_state);
-       array<double, 49> massArray = model.mass(robot_state);
-       array<double, 7> coriolisArray = model.coriolis(robot_state);
+        time_stamp = time;
+        robot_state = robotState;
+     
+        const auto& jacobianArray = model.zeroJacobian(franka::Frame::kEndEffector, robot_state);
+        const auto& massArray = model.mass(robot_state);
+        const auto& coriolisArray = model.coriolis(robot_state);
 
-       Eigen::Map<const Eigen::Matrix<double, 7, 1>> coriolis(coriolisArray.data());
-       Eigen::Map<const Eigen::Matrix<double, 6, 7>> jacobian(jacobianArray.data());
-       Eigen::Map<const Eigen::Matrix<double, 7, 7>> M(massArray.data());
-       Eigen::Map<const Eigen::Matrix<double, 7, 1>> q(robot_state.q.data());
-       Eigen::Map<const Eigen::Matrix<double, 7, 1>> dq(robot_state.dq.data());
-       q_ = q;
-       dq_ = dq;
-       M_ = M;
-       jacobian_ = jacobian;
-       coriolis_ = coriolis; 
-  */     
-           const auto& jacobianArray = model.zeroJacobian(franka::Frame::kEndEffector, robot_state);
-    const auto& massArray = model.mass(robot_state);
-    const auto& coriolisArray = model.coriolis(robot_state);
+        jacobian_ = Eigen::Map<const Eigen::Matrix<double, 6, 7>>(jacobianArray.data());
+        M_ = Eigen::Map<const Eigen::Matrix<double, 7, 7>>(massArray.data());
+        coriolis_ = Eigen::Map<const Eigen::Matrix<double, 7, 1>>(coriolisArray.data());
+        q_ = Eigen::Map<const Eigen::Matrix<double, 7, 1>>(robot_state.q.data());
+        dq_ = Eigen::Map<const Eigen::Matrix<double, 7, 1>>(robot_state.dq.data());
+        
+        Eigen::Matrix4d T_EE_0(Eigen::Matrix4d::Map(robot_state.O_T_EE.data()));
+        {
+            lock_guard<mutex> lock(sharedEEPose.mtx);
+            sharedEEPose.pose = T_EE_0;
 
-    // Directly map instead of assigning to temporary Eigen objects
-    jacobian_ = Eigen::Map<const Eigen::Matrix<double, 6, 7>>(jacobianArray.data());
-    M_ = Eigen::Map<const Eigen::Matrix<double, 7, 7>>(massArray.data());
-    coriolis_ = Eigen::Map<const Eigen::Matrix<double, 7, 1>>(coriolisArray.data());
-    q_ = Eigen::Map<const Eigen::Matrix<double, 7, 1>>(robot_state.q.data());
-    dq_ = Eigen::Map<const Eigen::Matrix<double, 7, 1>>(robot_state.dq.data());
-
-
-
-
-       switch (state) {
+        }
+        switch (state) {
             case State::Idle:
 		        return processIdle();
             case State::Registration:
@@ -419,7 +422,7 @@ private:
     double LIFT_HEIGHT;
     double OBJECT_BOTTOM_TO_CENTRE;
 
-    double MAX_CARTESIAN_VELOCITY = 0.1;
+    double MAX_CARTESIAN_VELOCITY = 0.25;
     int N = 20;
 
     int missingFrames;
@@ -444,19 +447,19 @@ private:
         return true;
     } 
 
+    //make sure to lock camera mutex before calling this function
     void convert_to_global(CameraData& data) {
         if (!data.global_frame) {
 	        data.global_frame = true;
-	        Eigen::Isometry3d T_EE_0(Eigen::Matrix4d::Map(robot_state.O_T_EE.data()));
-	        data.pose = T_EE_0 * data.pose;
+	        data.pose = data.o_T_g * data.pose;
 	    }    
     }
 
+    //make sure to lock camera mutex before calling this function
     void convertToEEFrame(CameraData& data) {
         if (data.global_frame) {
             data.global_frame = false;
-            Eigen::Isometry3d T_EE_0(Eigen::Matrix4d::Map(robot_state.O_T_EE.data()));
-            data.pose = T_EE_0.inverse() * data.pose;
+            data.pose = data.o_T_g.inverse() * data.pose;
         }
     }
 
@@ -667,7 +670,8 @@ private:
                 false,
                 Eigen::Vector3d::Zero(),
                 0,
-                vector<Eigen::VectorXd>()
+                vector<Eigen::VectorXd>(),
+                OFFSET
             };
             std::lock_guard<std::mutex> lock(cameraDataMutex);
             cameraData.new_data = false;
@@ -727,6 +731,12 @@ private:
             visualServoingParams.filteredObjectOrientation = currentObjOrientaionQ.slerp(0.1, measuredObjOrientaionQ).toRotationMatrix();    
 
             std::chrono::duration<double> test = cameraData.processTime -  start;
+            Eigen::Vector3d real;
+            real <<  cameraData.pose.translation() ;
+            string real_time = to_string(test.count());
+            log_vs_ << real_time << " " << real.transpose() << endl;
+            log_ad_ << time() << " " << real.transpose() << endl;
+
         }
        
         if (visualServoingParams.estimator == nullptr) return maintain_base_pos();
@@ -737,12 +747,13 @@ private:
         visualServoingParams.ringBuffer->push_back({time_stamp, estimatedObjectData, P});
 
         // Rate limiter
-        double MAX_RATE = 0.001;
+        double MAX_RATE = 0.005;
         Eigen::Vector3d desiredChange = estimatedObjectData.head(3) - visualServoingParams.filteredObjectPosition;
         Eigen::Vector3d saturedChange = desiredChange;
         saturedChange = saturedChange.cwiseMin(MAX_RATE);
         saturedChange = saturedChange.cwiseMax(- MAX_RATE);
         Eigen::Vector3d saturedObjectPosition = visualServoingParams.filteredObjectPosition + saturedChange; 
+        log_vs_rp_ << time() << (visualServoingParams.filteredObjectPosition).transpose() << endl;
 
         // Low pass filter
         double alpha = 0.1;
@@ -754,18 +765,18 @@ private:
         Eigen::Matrix4d T_EE_0(Eigen::Matrix4d::Map(robot_state.O_T_EE.data()));
         Eigen::VectorXd tauCmd;
         log_rp_ << time() << " " <<  T_EE_0.topRightCorner<3,1>().transpose() << endl;
-        Eigen::Vector3d offset;
-
 
         if (visualServoingParams.subState == VisualServoingSubState::Following){
-             if (time_stamp >= visualServoingParams.startTime + 1) visualServoingParams.subState = VisualServoingSubState::Approaching;
-             offset = OFFSET;
+             if (time_stamp >= visualServoingParams.startTime + 0.5) visualServoingParams.subState = VisualServoingSubState::Approaching;
         } else {
-            double lambda_ = min(1.0,  (time_stamp - visualServoingParams.startTime - 1) / 2.0);
-            offset = lambda_ * GRASP_OFFSET + (1 - lambda_) * OFFSET;
+            Eigen::Vector3d desiredOffsetChange = GRASP_OFFSET - visualServoingParams.offset;
+            Eigen::Vector3d saturedOffsetChange = desiredOffsetChange;
+            saturedOffsetChange = saturedOffsetChange.cwiseMin(MAX_RATE);
+            saturedOffsetChange = saturedOffsetChange.cwiseMax(- MAX_RATE); 
+            visualServoingParams.offset += saturedOffsetChange; 
             
             if (visualServoingParams.subState == VisualServoingSubState::Approaching) {
-                if (lambda_ == 1) {
+                if ((visualServoingParams.filteredObjectPosition + GRASP_OFFSET - T_EE_0.topRightCorner<3, 1>()).norm() <= sqrt(3 * pow(0.005, 2)) ) {
                     workerFinished.store(false, std::memory_order_release);
                     workerThread_ = thread(&StateController::graspObject, this);
                     visualServoingParams.subState = VisualServoingSubState::Grasping;
@@ -786,14 +797,12 @@ private:
             }
             
         }  
-        
-        log_vs_rp_ << time() << " " << (visualServoingParams.filteredObjectPosition + offset).transpose() << "  " << objectVelocity.transpose() << endl; 
-        
+       
         double predictionTimeDelta = 0.2;
         if (visualServoingParams.newData) {
             visualServoingParams.newData = false;
             visualServoingParams.coeffs = vector<Eigen::VectorXd>(3);
-            Eigen::Vector3d predictedObjectPosition = visualServoingParams.filteredObjectPosition + predictionTimeDelta * objectVelocity + offset; 
+            Eigen::Vector3d predictedObjectPosition = visualServoingParams.filteredObjectPosition + predictionTimeDelta * objectVelocity + visualServoingParams.offset; 
             for (int i = 0; i < 3; i ++) {
                 Eigen::Matrix<double, 6, 6> A;
                 A <<  pow(0, 5),     pow(0, 4),     pow(0, 3),     pow(0, 2),  0, 1.0,
@@ -814,7 +823,7 @@ private:
         Eigen::Vector3d controllerInputAcceleration;
 
         if (time_stamp - visualServoingParams.newDataTimestamp > predictionTimeDelta){
-            controllerInputPosition = visualServoingParams.filteredObjectPosition + offset;
+            controllerInputPosition = visualServoingParams.filteredObjectPosition + visualServoingParams.offset;
             controllerInputVelocity = objectVelocity;
             controllerInputAcceleration.setZero();
         } else {
@@ -827,7 +836,7 @@ private:
             }
         }
  
-        log_pp_ << time() << " "  <<  controllerInputPosition.transpose()  << endl;
+        log_pp_ << time() << " "  <<  estimatedObjectData.head(3).transpose()  << endl;
 
         tauCmd = cartesianController(controllerInputPosition, visualServoingParams.filteredObjectOrientation * GRASPING_TRANSFORMATION, controllerInputVelocity,  controllerInputAcceleration);
         visualServoingParams.previousAcceleration = controllerInputAcceleration;
@@ -855,7 +864,7 @@ private:
     array<double, 7> processLifting() { 
         Eigen::Matrix4d T_EE_0(Eigen::Matrix4d::Map(robot_state.O_T_EE.data()));
 
-        double MAX_CARTESIAN_DISPLACEMENT = 0.00005;
+        double MAX_CARTESIAN_DISPLACEMENT = 0.00007;
         Eigen::VectorXd tauCmd;
         switch (liftingParams.subState) {
             case LiftingSubState::Lift: {                           
@@ -1002,6 +1011,12 @@ int main(int argc, char ** argv) {
     franka::Model model = robot.loadModel();
     double time = 0.0;
     franka::RobotState initial_state = robot.readOnce();
+    {
+        lock_guard<mutex> lock(sharedEEPose.mtx);
+        Eigen::Matrix4d initilEEPose(Eigen::Matrix4d::Map(initial_state.O_T_EE.data()));
+        sharedEEPose.pose = initilEEPose;
+    }
+
     Eigen::Map<const Eigen::Matrix<double, 7, 1>> q_init(initial_state.q.data());
     franka::Gripper gripper(argv[1]);
     StateController controller(model, gripper, q_init);  
@@ -1076,10 +1091,19 @@ int main(int argc, char ** argv) {
 	        zmq::message_t msg_depth(compressed_dframe.size());
             memcpy(msg_depth.data(), compressed_dframe.data(), compressed_dframe.size());
             
+            vector<double> flattenedData;
+            {
+                lock_guard<mutex> lock(sharedEEPose.mtx);
+                flattenedData = vector<double>(sharedEEPose.pose.data(), sharedEEPose.pose.data() + sharedEEPose.pose.size());
+            }
+            zmq::message_t msg_ee_pose(sizeof(double) * flattenedData.size());
+            memcpy(msg_ee_pose.data(), flattenedData.data(), flattenedData.size() * sizeof(double));
+
             socket.send(msg_color, zmq::send_flags::sndmore);
 	        socket.send(msg_depth, zmq::send_flags::sndmore);
             socket.send(msgFrameNumber, zmq::send_flags::sndmore);
-            socket.send(msg_timestamp, zmq::send_flags::none);
+            socket.send(msg_timestamp, zmq::send_flags::sndmore);
+            socket.send(msg_ee_pose, zmq::send_flags::none);
             
             frameNumber ++;
     };
@@ -1106,4 +1130,4 @@ int main(int argc, char ** argv) {
 
     return 0;
 }
-
+    
