@@ -1,7 +1,7 @@
 # Real-Time Tracking & Grasping of Moving Objects with a Franka Panda
 
 ## Overview
-This project showcases a visual-servoing pick-and-place system designed to handle objects moving on a conveyor belt using a Franka-Emika Panda robot arm. The main objective is to accurately locate and grasp these moving objects by continuously determining their 6D pose (position and orientation). To accomplish this, an Intel RealSense D405 camera captures RGB-D images, which are transmitted via ZeroMQ to a remote server equipped with an NVIDIA RTX 4090 GPU. On this server, a pre-trained NVIDIA Foundation Pose model processes the incoming data in real time and sends back the object’s 6D pose estimates. 
+This project showcases a **real-time object tracking and grasping system** for a **Franka Emika Panda** robot, designed to handle objects moving on a conveyor belt. An **Intel RealSense D405** camera captures **RGB-D** images, which are streamed via **ZeroMQ** to a **remote serve**r with an **NVIDIA RTX 4090 GPU**, where a pre-trained **NVIDIA FoundationPose** model performs **6D pose** estimation in real time. The robot controller, implemented in **C++**, uses **CasADi** for trajectory optimization and applies both **joint-level and Cartesian impedance control** via **libfranka**, with visual feedback continuously guiding its motion in response to the object's movement.
 
 ## Demo
 
