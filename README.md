@@ -23,10 +23,10 @@ https://github.com/user-attachments/assets/84b7e4d4-6665-42a5-86f0-c73ba519fadc
   - Uses **real-time feedback** for precise alignment.  
   - **Torque control** is managed via **libfranka**.
 
-- **Multi-Stage Operation**  
-  1. **Initial Tracking**: The robot moves to observe the object.  
-  2. **Dynamic Following**: Continuously updates its motion based on real-time pose updates.  
-  3. **Grasp Execution**: Once aligned, the robot attempts to grasp the object.
+- **Multi-Stage Operation**
+   1. **Initial Tracking**: The robot moves to a region with a clear view of the conveyor belt to begin monitoring for objects.
+   2. **Trajectory Planning & Approach**: Once an object is detected, the robot plans and executes a trajectory to approach it, ensuring the object remains in the camera’s view throughout the motion.
+   3. **Dynamic Following & Grasp Execution**: As the robot nears the object, it switches to visual servoing, continuously adjusting its motion based on real-time pose updates to follow and grasp the moving object accurately.
 
 ## Repository Structure
 - **state_controller.cpp**  
