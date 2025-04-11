@@ -17,7 +17,7 @@ SX orientationErrorAngleAxis(const SX &R_current, const SX &R_des);
  
 std::pair<SX,SX> forward_kinematics(const SX &q);
 
-std::vector<Eigen::VectorXd> generate_joint_waypoint(
+std::pair<std::vector<Eigen::VectorXd>, bool> generate_joint_waypoint(
         int N,
         double total_time,
         Eigen::Isometry3d obj_init_pose,

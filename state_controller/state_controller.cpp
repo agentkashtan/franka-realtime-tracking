@@ -58,66 +58,6 @@ struct CameraData {
 std::mutex cameraDataMutex;
 CameraData cameraData = { false, Eigen::Isometry3d::Identity(), false, false };
 
-void camera_data_receiver(zmq::context_t& ctx) {
-    zmq::socket_t socket_in(ctx, zmq::socket_type::pull);
-    socket_in.connect("tcp://129.97.71.51:5554");
-    while (true) {
-	    zmq::message_t msg;
-	    zmq::message_t msg_frameNumber;
-        zmq::message_t msg_timestamp;
-        zmq::message_t msg_ee_transform;
-
-	    socket_in.recv(msg, zmq::recv_flags::none);
-        socket_in.recv(msg_frameNumber, zmq::recv_flags::dontwait);
-	    socket_in.recv(msg_timestamp, zmq::recv_flags::dontwait);    
-	    socket_in.recv(msg_ee_transform, zmq::recv_flags::dontwait);
-
-	    vector<double> pose(6); 
-	    memcpy(pose.data(), msg.data(), 6 * sizeof(double));
-	    Eigen::Isometry3d camera_T_tag;
-	    Eigen::Vector3d rotation_vector(pose[0], pose[1], pose[2]);
-	    camera_T_tag.linear() = Eigen::AngleAxis(
-			rotation_vector.norm(), rotation_vector.normalized()
-		).toRotationMatrix();
-    	camera_T_tag.translation() = Eigen::Vector3d(pose[3], pose[4], pose[5]);
-	    uint64_t timestamp_ns;
-        int frameNumber;
-        memcpy(&frameNumber, msg_frameNumber.data(), sizeof(frameNumber));
-        memcpy(&timestamp_ns, msg_timestamp.data(), sizeof(timestamp_ns));
-	    auto now = chrono::high_resolution_clock::now();
-        auto start = chrono::time_point<chrono::high_resolution_clock>(chrono::nanoseconds(timestamp_ns));
-	    chrono::duration<double> duration = now - start;  
-        Eigen::Isometry3d g_T_cad;
-        g_T_cad.setIdentity();
-        g_T_cad.linear() << 0, 1, 0,
-                            1, 0, 0,
-                            0, 0, -1;
-        g_T_cad.translation() << 0, 0, -0.1034;
-
-        Eigen::Isometry3d cad_T_cam_c;
-        cad_T_cam_c.setIdentity();
-        double cam_c_to_cad_angle = - 5 * M_PI / 6;
-        cad_T_cam_c.linear() << 1, 0, 0,
-                                0, cos(cam_c_to_cad_angle), -sin(cam_c_to_cad_angle),
-                                0, sin(cam_c_to_cad_angle), cos(cam_c_to_cad_angle);
-        cad_T_cam_c.translation() << 0, -0.10069, -0.01048;
-
-        Eigen::Isometry3d cam_c_T_c;
-        cam_c_T_c.setIdentity();
-        cam_c_T_c.translation() << -0.009, 0, 0;
-
-        Eigen::Isometry3d g_T_c =  g_T_cad * cad_T_cam_c * cam_c_T_c;
-
-
-        vector<double> ee_pose(16);
-        memcpy(ee_pose.data(), msg_ee_transform.data(), 16 * sizeof(double));
-        Eigen::Matrix4d o_T_g_matrix = Eigen::Matrix4d::Map(ee_pose.data());
-        Eigen::Isometry3d o_T_g(o_T_g_matrix);
-        std::lock_guard<std::mutex> lock(cameraDataMutex);
-        cameraData = { true, g_T_c * camera_T_tag, false, true, frameNumber, start, o_T_g };
-    }
-}
-
 struct StateEntry {
     double timestamp;
     Eigen::Matrix<double, 6, 1> state;
@@ -134,14 +74,15 @@ class RingBuffer {
             if (full_) start_ = (start_ + 1) % capacity_;
             end_ = (end_ + 1) % capacity_;
             full_ = (end_ == start_);
+            //cout << "pushed " << entry.state.topLeftCorner<3, 1>().transpose() << endl;
         }
 
         StateEntry get_state(double ts) {
             int i = end_ - 1;
             if (!full_) {
-                while (i >= start_) {
+                while (i >= 0 && static_cast<size_t>(i) >= start_) {
                     if (data_[i].timestamp <= ts) {
-                        return data_[i];
+                       return data_[i];
                     }
                     i --;
                 }
@@ -154,14 +95,13 @@ class RingBuffer {
                 i --;
             }
             i = capacity_ - 1;
-            while (i >= start_) {
+            while (i >= 0 && static_cast<size_t>(i) >= start_) {
                 if (data_[i].timestamp <= ts) {
                     return data_[i];
                 }
                 i --;
             }
             return data_[start_];
-
         }
     private:
         size_t capacity_;
@@ -316,10 +256,10 @@ void adjustComputeThreadPriority(std::thread& compute_thread) {
 class StateController {
 public:
     StateController(franka::Model& model, franka::Gripper& gripper,  Eigen::VectorXd qInit)
-        : gripper_(gripper),
-          model(model),
-          state(State::Idle),
-          q_base(qInit) {
+        : model(model),
+          gripper_(gripper),
+          q_base(qInit),
+          state(State::Idle) {
             log_ik_ = std::ofstream("/dev/shm/ik.log");
 	        log_ = std::ofstream("/dev/shm/controller.log");
             
@@ -329,18 +269,26 @@ public:
             log_ad_ = std::ofstream("/dev/shm/a_data.log");
 	        log_vs_ = std::ofstream("/dev/shm/vs_data.log");
 	        log_vs_rp_ = std::ofstream("/dev/shm/vs_data_actual_pos.log");
-	    
+	        
+            log_tq_ = std::ofstream("/dev/shm/tq_data.log");
+            log_tq_ff_ = std::ofstream("/dev/shm/tq_ff_data.log");
+
+
 	        start = std::chrono::high_resolution_clock::now();
 	        Kp.diagonal() << 200, 200, 200, 200, 200, 200,200;
             Kd.diagonal() << 20, 20, 20, 20, 20, 20, 8;
             
             //CONVEYOR_BELT_SPEED << -0.04633, 0.0, 0.0;
-            CONVEYOR_BELT_SPEED << -0.15, 0.0, 0.0;
-            OFFSET << 0.0, 0, 0.15;   
+            CONVEYOR_BELT_SPEED << -0.23, 0.0, 0.0;
+            OFFSET << 0.0, 0, 0.20;   
             GRASPING_TRANSFORMATION << 0, 1, 0,
                                       -1, 0, 0,
                                       0, 0, 1;
-            GRASP_OFFSET << 0, 0, 0.1;
+            
+            Eigen::AngleAxisd rotZPI(M_PI, Eigen::Vector3d::UnitZ());
+            ALTERNATIVE_GRASPING_TRANSFORMATION = rotZPI.toRotationMatrix();
+
+            GRASP_OFFSET << 0, 0, 0.2;
             LIFT_HEIGHT = 0.4;
             DROP_OFF_POSITION << 0.55, -0.1, 0; 
             OBJECT_BOTTOM_TO_CENTRE = 0.075;
@@ -356,6 +304,10 @@ public:
         auto end = std::chrono::high_resolution_clock::now();
         std::chrono::duration<double> duration = end - start;
         return duration.count();
+    }
+
+    void set_q_base(Eigen::Matrix<double, 7, 1> q) {
+        q_base = q;
     }
 
     array<double, 7> update(double time, franka::RobotState robotState) {
@@ -387,15 +339,20 @@ public:
                 return processApproachPointComputationPhase();  
             case State::Approaching:
                 return processApproachPhase();
-           case State::VisualServoing:
+            case State::VisualServoing:
                 return processVisualServoing();
             case State::Lifting:
                 return processLifting();
-       }
+            default:
+                throw runtime_error("Received unexpected controller state");    
+        }
     }
-    Eigen::Matrix<double, 7, 1> q_base;
- 
+    
 private:
+    franka::Model& model;
+    franka::Gripper& gripper_;
+    Eigen::Matrix<double, 7, 1> q_base;
+
     State state;
     Eigen::Matrix<double, 6, 7> jacobian_;
     Eigen::Matrix<double, 7, 7> M_;
@@ -411,12 +368,15 @@ private:
     std::ofstream log_ad_;
     std::ofstream log_vs_;
     std::ofstream log_vs_rp_;
+    ofstream log_tq_;
+    ofstream log_tq_ff_;
 
     std::chrono::high_resolution_clock::time_point start;
     Eigen::Vector3d OFFSET;
     Eigen::Vector3d CONVEYOR_BELT_SPEED;
     Eigen::Matrix3d GRASPING_ORIENTATION;
     Eigen::Matrix3d GRASPING_TRANSFORMATION;
+    Eigen::Matrix3d ALTERNATIVE_GRASPING_TRANSFORMATION;
     Eigen::Vector3d GRASP_OFFSET;
     Eigen::Vector3d DROP_OFF_POSITION;
     double LIFT_HEIGHT;
@@ -429,8 +389,6 @@ private:
     vector<Eigen::Vector3d> positions;
     double time_stamp;
     franka::RobotState robot_state;
-    franka::Model& model;
-    franka::Gripper& gripper_;
     Eigen::DiagonalMatrix<double, 7> Kp;
     Eigen::DiagonalMatrix<double, 7> Kd;
     IdleParams idleParams;
@@ -470,7 +428,7 @@ private:
         return tauDArray;
     }
 
-    Eigen::VectorXd cartesianController(Eigen::Vector3d positionD, Eigen::Matrix3d orientationD, Eigen::Vector3d objectVelocity, Eigen::Vector3d accelerationD = Eigen::Vector3d::Zero()) {
+    Eigen::VectorXd cartesianController(Eigen::Vector3d positionD, Eigen::Matrix3d orientationD, Eigen::Vector3d objectVelocity, bool logTorques = false, Eigen::Vector3d accelerationD = Eigen::Vector3d::Zero()) {
         Eigen::Matrix4d T_EE_0(Eigen::Matrix4d::Map(robot_state.O_T_EE.data()));
 
         const double translational_stiffness{500.0};
@@ -480,10 +438,11 @@ private:
         stiffness.topLeftCorner(3, 3) << translational_stiffness * Eigen::MatrixXd::Identity(3, 3);
         stiffness.bottomRightCorner(3, 3) << rotational_stiffness * Eigen::MatrixXd::Identity(3, 3);
         damping.setZero();
+        Eigen::MatrixXd M_task_space = (jacobian_ * M_.inverse() * jacobian_.transpose()).inverse();
         damping.topLeftCorner(3, 3) << 2.0 * sqrt(translational_stiffness) *
-                                           Eigen::MatrixXd::Identity(3, 3);
+                                           M_task_space.topLeftCorner<3,3>();
         damping.bottomRightCorner(3, 3) << 2.0 * sqrt(rotational_stiffness) *
-                                               Eigen::MatrixXd::Identity(3, 3);
+                                               M_task_space.bottomRightCorner<3,3>();
 
         Eigen::DiagonalMatrix<double, 6> Kp_ts(300, 300, 300, 30, 30, 30);
         Eigen::DiagonalMatrix<double, 7> Kd(20, 20, 20, 20, 20, 20, 8);
@@ -496,7 +455,7 @@ private:
         Eigen::VectorXd error_p(6);
         error_p.head(3) = error_pos;
         error_p.tail(3) = error_orient;
-
+        //cout << "CC error. pos: " << error_pos.norm() << "; orient: " << error_orient.norm(); 
         Eigen::VectorXd dqDesiredTaskSpace = Eigen::VectorXd::Zero(6);
         dqDesiredTaskSpace.head(3) = objectVelocity;
 
@@ -507,8 +466,13 @@ private:
         accelerationDesired6d.setZero();
         accelerationDesired6d.head(3) = accelerationD;
         ff = (jacobian_ * M_.inverse() * jacobian_.transpose()).inverse() * accelerationDesired6d;
-
+        //cout << " ; vel: " << (dqDesiredTaskSpace - jacobian_ * dq_).norm() << " "  << " ; ff: " << accelerationDesired6d.norm() <<endl;
         tau = jacobian_.transpose() * ( stiffness * error_p + damping * (dqDesiredTaskSpace - jacobian_ * dq_) + ff);
+        
+        if (logTorques) {
+            log_tq_ << time() << " " << (jacobian_.transpose() * ( stiffness * error_p + damping * (dqDesiredTaskSpace - jacobian_ * dq_))).transpose() << endl;
+            log_tq_ff_ << time() << " " << (jacobian_.transpose() * ff).transpose() << endl;
+        }
         return tau;
     }
 
@@ -552,8 +516,8 @@ private:
             log_ << time() << " started computiotions" << endl;
             auto startComp = chrono::high_resolution_clock::now();
             double intersectTime = feasibleMinTime(objectPose.translation(), CONVEYOR_BELT_SPEED, T_EE_0.topRightCorner<3,1>(), MAX_CARTESIAN_VELOCITY);
-
-            vector<Eigen::VectorXd> jointWaypoints = generate_joint_waypoint(
+            if (intersectTime == -1) throw runtime_error("Failed to intersept the object");
+            pair<vector<Eigen::VectorXd>, bool> result = generate_joint_waypoint(
                     N, 
                     intersectTime,
                     objectPose,
@@ -562,6 +526,8 @@ private:
                     OFFSET,
                     GRASPING_TRANSFORMATION
                     );
+            vector<Eigen::VectorXd>& jointWaypoints = result.first;
+            if (result.second) GRASPING_TRANSFORMATION *= ALTERNATIVE_GRASPING_TRANSFORMATION; 
             auto endComp = chrono::high_resolution_clock::now();
             chrono::duration<double> computationTime = endComp - startComp;
             double reachTime = intersectTime - computationTime.count();    
@@ -666,7 +632,8 @@ private:
                 approachParams.predictedObjectPose.linear(), 
                 nullptr,
                 new RingBuffer(500),
-                VisualServoingSubState::Following,
+                //VisualServoingSubState::Following,
+                VisualServoingSubState::Approaching,
                 false,
                 Eigen::Vector3d::Zero(),
                 0,
@@ -708,6 +675,7 @@ private:
             visualServoingParams.newDataTimestamp = time_stamp;
             if (visualServoingParams.estimator == nullptr) {
                 visualServoingParams.previousTimeStamp = time_stamp; 
+                visualServoingParams.filteredObjectOrientation = cameraData.pose.linear();
                 Eigen::MatrixXd P = Eigen::MatrixXd::Identity(6, 6) * 0.02;
                 P.topLeftCorner(3, 3) = Eigen::MatrixXd::Identity(3, 3) * 0.2;
 	            Eigen::VectorXd kalmanFilterInitialState = Eigen::VectorXd::Zero(6);
@@ -723,19 +691,24 @@ private:
             std::chrono::duration<double> duration = currentTime - cameraData.processTime;
             
             const StateEntry& pastState = visualServoingParams.ringBuffer->get_state(time_stamp - duration.count());
+            cout << "past state " << time_stamp << " "<< pastState.state.topLeftCorner<3, 1>().transpose() << endl;
             visualServoingParams.estimator->set_state(pastState.state, pastState.P, time_stamp - duration.count()); 
             visualServoingParams.estimator->correct(cameraData.pose.translation());
 
             Eigen::Quaterniond currentObjOrientaionQ(visualServoingParams.filteredObjectOrientation);
             Eigen::Quaterniond measuredObjOrientaionQ(cameraData.pose.linear());
-            visualServoingParams.filteredObjectOrientation = currentObjOrientaionQ.slerp(0.1, measuredObjOrientaionQ).toRotationMatrix();    
+            if (currentObjOrientaionQ.dot(measuredObjOrientaionQ) < 0.0) {
+                measuredObjOrientaionQ.coeffs() *= -1;
+            }
+            visualServoingParams.filteredObjectOrientation = currentObjOrientaionQ.slerp(0.3, measuredObjOrientaionQ).toRotationMatrix();    
 
             std::chrono::duration<double> test = cameraData.processTime -  start;
             Eigen::Vector3d real;
-            real <<  cameraData.pose.translation() ;
+            Eigen::Vector3d eulerAngels = (cameraData.pose.linear() * GRASPING_TRANSFORMATION).eulerAngles(0, 1, 2);
+            real =  cameraData.pose.translation() ;
             string real_time = to_string(test.count());
-            log_vs_ << real_time << " " << real.transpose() << endl;
-            log_ad_ << time() << " " << real.transpose() << endl;
+            log_vs_ << real_time << " " << real.transpose() << " " << eulerAngels.transpose() << endl;
+            log_ad_ << time() << " " << real.transpose() << " " << eulerAngels.transpose()<< endl;
 
         }
        
@@ -753,10 +726,10 @@ private:
         saturedChange = saturedChange.cwiseMin(MAX_RATE);
         saturedChange = saturedChange.cwiseMax(- MAX_RATE);
         Eigen::Vector3d saturedObjectPosition = visualServoingParams.filteredObjectPosition + saturedChange; 
-        log_vs_rp_ << time() << (visualServoingParams.filteredObjectPosition).transpose() << endl;
+       // log_vs_rp_ << time() << (visualServoingParams.filteredObjectPosition).transpose() << endl;
 
         // Low pass filter
-        double alpha = 0.1;
+        double alpha = 0.3;
         visualServoingParams.filteredObjectPosition += alpha * ( saturedObjectPosition - visualServoingParams.filteredObjectPosition);
 
         Eigen::Vector3d objectVelocity = estimatedObjectData.tail(3); 
@@ -764,19 +737,20 @@ private:
    
         Eigen::Matrix4d T_EE_0(Eigen::Matrix4d::Map(robot_state.O_T_EE.data()));
         Eigen::VectorXd tauCmd;
-        log_rp_ << time() << " " <<  T_EE_0.topRightCorner<3,1>().transpose() << endl;
+        log_rp_ << time() << " " <<  T_EE_0.topRightCorner<3,1>().transpose()<< " " << T_EE_0.topLeftCorner<3,3>().eulerAngles(0, 1, 2).transpose() << endl;
 
         if (visualServoingParams.subState == VisualServoingSubState::Following){
              if (time_stamp >= visualServoingParams.startTime + 0.5) visualServoingParams.subState = VisualServoingSubState::Approaching;
         } else {
             Eigen::Vector3d desiredOffsetChange = GRASP_OFFSET - visualServoingParams.offset;
+            
             Eigen::Vector3d saturedOffsetChange = desiredOffsetChange;
-            saturedOffsetChange = saturedOffsetChange.cwiseMin(MAX_RATE);
-            saturedOffsetChange = saturedOffsetChange.cwiseMax(- MAX_RATE); 
+            saturedOffsetChange = saturedOffsetChange.cwiseMin(MAX_RATE / 15);
+            saturedOffsetChange = saturedOffsetChange.cwiseMax(- MAX_RATE / 15); 
             visualServoingParams.offset += saturedOffsetChange; 
             
             if (visualServoingParams.subState == VisualServoingSubState::Approaching) {
-                if ((visualServoingParams.filteredObjectPosition + GRASP_OFFSET - T_EE_0.topRightCorner<3, 1>()).norm() <= sqrt(3 * pow(0.005, 2)) ) {
+                if (false && (visualServoingParams.filteredObjectPosition + GRASP_OFFSET - T_EE_0.topRightCorner<3, 1>()).norm() <= sqrt(3 * pow(0.005, 2)) ) {
                     workerFinished.store(false, std::memory_order_release);
                     workerThread_ = thread(&StateController::graspObject, this);
                     visualServoingParams.subState = VisualServoingSubState::Grasping;
@@ -826,6 +800,7 @@ private:
             controllerInputPosition = visualServoingParams.filteredObjectPosition + visualServoingParams.offset;
             controllerInputVelocity = objectVelocity;
             controllerInputAcceleration.setZero();
+            cout << "run out off pred window" << endl;
         } else {
             double nextStep = time_stamp - visualServoingParams.newDataTimestamp;
             vector<Eigen::VectorXd> c = visualServoingParams.coeffs;
@@ -837,8 +812,9 @@ private:
         }
  
         log_pp_ << time() << " "  <<  estimatedObjectData.head(3).transpose()  << endl;
+        log_vs_rp_ << time() << " "  << (controllerInputPosition).transpose() << " " << (visualServoingParams.filteredObjectOrientation * GRASPING_TRANSFORMATION).eulerAngles(0, 1, 2).transpose() << endl;
 
-        tauCmd = cartesianController(controllerInputPosition, visualServoingParams.filteredObjectOrientation * GRASPING_TRANSFORMATION, controllerInputVelocity,  controllerInputAcceleration);
+        tauCmd = cartesianController(controllerInputPosition, visualServoingParams.filteredObjectOrientation * GRASPING_TRANSFORMATION, controllerInputVelocity, true,  controllerInputAcceleration);
         visualServoingParams.previousAcceleration = controllerInputAcceleration;
         tauCmd += coriolis_;
         std::array<double, 7> tau_d_array{};
@@ -887,7 +863,7 @@ private:
                 saturatedChange = saturatedChange.cwiseMin(MAX_CARTESIAN_DISPLACEMENT);
                 saturatedChange = saturatedChange.cwiseMax(- MAX_CARTESIAN_DISPLACEMENT);
                 liftingParams.currentPose.translation() += saturatedChange;
-                tauCmd = cartesianController(liftingParams.currentPose.translation() , liftingParams.liftingGoalPose.linear(), Eigen::Vector3d::Zero());
+                tauCmd = cartesianController(liftingParams.currentPose.translation() , liftingParams.liftingGoalPose.linear(), Eigen::Vector3d::Zero(), true);
                 tauCmd += coriolis_;
                 std::array<double, 7> tau_d_array{};
                 Eigen::VectorXd::Map(&tau_d_array[0], 7) = tauCmd;
@@ -975,7 +951,8 @@ private:
             }
             case LiftingSubState::PlacementUp: {
                 if ((liftingParams.currentPose.translation() - liftingParams.liftingGoalPose.translation()).norm() <= sqrt(3 * pow(0.005, 2))) {
-                    throw runtime_error("Done");
+                    //throw runtime_error("Done");
+                    q_base = q_;
                     return maintain_base_pos();
                 }
                 Eigen::Vector3d saturatedChange  = liftingParams.liftingGoalPose.translation() - liftingParams.currentPose.translation();
@@ -989,18 +966,82 @@ private:
                 return tau_d_array;
             }
         }
-
         tauCmd += coriolis_;
         std::array<double, 7> tau_d_array{};
         Eigen::VectorXd::Map(&tau_d_array[0], 7) = tauCmd;
-
         return tau_d_array;
-
     }
-
-  
- 
 };
+
+
+void camera_data_receiver(zmq::context_t& ctx) {
+    zmq::socket_t socket_in(ctx, zmq::socket_type::pull);
+    if(getenv("SERVER_IP6")) {
+        std::stringstream str;
+        str << "udp://[" << std::string(getenv("SERVER_IP6")) << "]:5554";
+        std::cout  << "Connecting to " << str.str() << std::endl;
+        socket_in.connect(str.str());
+    } else {
+        socket_in.connect("tcp://129.97.71.51:5554");
+    }
+    while (true) {
+        zmq::message_t msg;
+        zmq::message_t msg_frameNumber;
+        zmq::message_t msg_timestamp;
+        zmq::message_t msg_ee_transform;
+
+        socket_in.recv(msg, zmq::recv_flags::none);
+        socket_in.recv(msg_frameNumber, zmq::recv_flags::dontwait);
+        socket_in.recv(msg_timestamp, zmq::recv_flags::dontwait);
+        socket_in.recv(msg_ee_transform, zmq::recv_flags::dontwait);
+
+        vector<double> pose(6);
+        memcpy(pose.data(), msg.data(), 6 * sizeof(double));
+        Eigen::Isometry3d camera_T_tag;
+        Eigen::Vector3d rotation_vector(pose[0], pose[1], pose[2]);
+        camera_T_tag.linear() = Eigen::AngleAxis(
+            rotation_vector.norm(), rotation_vector.normalized()
+        ).toRotationMatrix();
+        camera_T_tag.translation() = Eigen::Vector3d(pose[3], pose[4], pose[5]);
+        uint64_t timestamp_ns;
+        int frameNumber;
+        memcpy(&frameNumber, msg_frameNumber.data(), sizeof(frameNumber));
+        memcpy(&timestamp_ns, msg_timestamp.data(), sizeof(timestamp_ns));
+        auto now = chrono::high_resolution_clock::now();
+        auto start = chrono::time_point<chrono::high_resolution_clock>(chrono::nanoseconds(timestamp_ns));
+        chrono::duration<double> duration = now - start;
+        Eigen::Isometry3d g_T_cad;
+        g_T_cad.setIdentity();
+        g_T_cad.linear() << 0, 1, 0,
+                            1, 0, 0,
+                            0, 0, -1;
+        g_T_cad.translation() << 0, 0, -0.1034;
+
+        Eigen::Isometry3d cad_T_cam_c;
+        cad_T_cam_c.setIdentity();
+        double cam_c_to_cad_angle = - 5 * M_PI / 6;
+        cad_T_cam_c.linear() << 1, 0, 0,
+                                0, cos(cam_c_to_cad_angle), -sin(cam_c_to_cad_angle),
+                                0, sin(cam_c_to_cad_angle), cos(cam_c_to_cad_angle);
+        cad_T_cam_c.translation() << 0, -0.10069, -0.01048;
+
+        Eigen::Isometry3d cam_c_T_c;
+        cam_c_T_c.setIdentity();
+        cam_c_T_c.translation() << -0.009, 0, 0;
+
+        Eigen::Isometry3d g_T_c =  g_T_cad * cad_T_cam_c * cam_c_T_c;
+
+
+        vector<double> ee_pose(16);
+        memcpy(ee_pose.data(), msg_ee_transform.data(), 16 * sizeof(double));
+        Eigen::Matrix4d o_T_g_matrix = Eigen::Matrix4d::Map(ee_pose.data());
+        Eigen::Isometry3d o_T_g(o_T_g_matrix);
+        std::lock_guard<std::mutex> lock(cameraDataMutex);
+        cameraData = { true, g_T_c * camera_T_tag, false, true, frameNumber, start, o_T_g };
+        //cout << controller.time() << " " << (g_T_c * camera_T_tag).translation().transpose() << endl;
+    }
+}
+
 
 int main(int argc, char ** argv) {
     // Robot set up
@@ -1026,7 +1067,14 @@ int main(int argc, char ** argv) {
     //Sockets set up
     zmq::context_t ctx(1);
     zmq::socket_t socket(ctx, zmq::socket_type::push);
-    socket.connect("tcp://129.97.71.51:5555");
+    if(getenv("SERVER_IP6")) {
+        std::stringstream str;
+        str << "udp://[" << std::string(getenv("SERVER_IP6")) << "]:5555";
+        std::cout  << "Connecting to " << str.str() << std::endl;
+        socket.connect(str.str());
+    } else {
+        socket.connect("tcp://129.97.71.51:5555");
+    }
 
     //Camera set up
     rs2::pipeline pipe;
@@ -1116,7 +1164,7 @@ int main(int argc, char ** argv) {
     //Start reciever thread
     thread camera_data_receiver_worker(camera_data_receiver, ref(ctx));
     
-    controller.q_base = q_init; 
+    controller.set_q_base(q_init); 
     auto control_callback = [&](const franka::RobotState& robot_state,
                                       franka::Duration period) -> franka::Torques {
         time += period.toSec();

@@ -419,7 +419,6 @@ int main(int argc, char ** argv)
         Eigen::VectorXd tau_cmd = Eigen::VectorXd::Zero(7);
 
 	if (mode == "true") { 
-		cout << "move"<< endl;
 		tau_cmd = first_phase_controller(time, q_init, q_base, q, dq, mass); 
 	} else {
 	 tau_cmd = first_phase_controller(time, q_init, q_test_speed_e, q, dq, mass);
