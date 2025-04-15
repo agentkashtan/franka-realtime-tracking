@@ -280,7 +280,7 @@ public:
             
             //CONVEYOR_BELT_SPEED << -0.04633, 0.0, 0.0;
             CONVEYOR_BELT_SPEED << -0.23, 0.0, 0.0;
-            OFFSET << 0.0, 0, 0.20;   
+            OFFSET << 0.0, 0, 0.25;   
             GRASPING_TRANSFORMATION << 0, 1, 0,
                                       -1, 0, 0,
                                       0, 0, 1;
@@ -288,7 +288,7 @@ public:
             Eigen::AngleAxisd rotZPI(M_PI, Eigen::Vector3d::UnitZ());
             ALTERNATIVE_GRASPING_TRANSFORMATION = rotZPI.toRotationMatrix();
 
-            GRASP_OFFSET << 0, 0, 0.2;
+            GRASP_OFFSET << 0, 0, 0.25;
             LIFT_HEIGHT = 0.4;
             DROP_OFF_POSITION << 0.55, -0.1, 0; 
             OBJECT_BOTTOM_TO_CENTRE = 0.075;
