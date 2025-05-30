@@ -328,6 +328,9 @@ Eigen::VectorXd solveInverseKinematics(
         )
 { 
     int ndof = 7;
+    std::vector<double> upperJointsLimits = {2.8973,  1.7628,  2.8973, -0.0698, 2.8973, 3.7525, 2.8973};
+    std::vector<double> lowerJointsLimits = {-2.8973, -1.7628, -2.8973, -3.0718, -2.8973, -0.0175, -2.8973};
+
     SX q_sym = SX::sym("q", ndof * 2);
     auto get_q = [&](int i)
     {
@@ -344,6 +347,11 @@ Eigen::VectorXd solveInverseKinematics(
     SX obj = SX::zeros(1);
     SX difference = qInitial - qFinal;
     obj = dot(difference, difference); 
+    
+    for (int i = 0; i < ndof; i ++) {
+        double range = upperJointsLimits[i] - lowerJointsLimits[i];
+        obj += 10 * pow((qFinal(i) - lowerJointsLimits[i] - range / 2) / range, 2); 
+    }
 
     std::vector<SX> g_list;
     std::vector<double> lbg_list, ubg_list;
@@ -375,10 +383,7 @@ Eigen::VectorXd solveInverseKinematics(
         lbg_list.push_back(0.0);
         ubg_list.push_back(0.0);
    }
-
-   std::vector<double> upperJointsLimits = {2.8973,  1.7628,  2.8973, -0.0698, 2.8973, 3.7525, 2.8973};
-   std::vector<double> lowerJointsLimits = {-2.8973, -1.7628, -2.8973, -3.0718, -2.8973, -0.0175, -2.8973};
-   
+  
    SX g;
    if (!g_list.empty())
    {
