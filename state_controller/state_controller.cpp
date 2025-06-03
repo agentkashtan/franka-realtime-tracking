@@ -304,7 +304,7 @@ public:
             Kd.diagonal() << 20, 20, 20, 20, 20, 20, 8;
             
             //CONVEYOR_BELT_SPEED << -0.04633, 0.0, 0.0;
-            CONVEYOR_BELT_SPEED << -0.15, 0.0, 0.0;
+            CONVEYOR_BELT_SPEED << -0.19, 0.0, 0.0;
             OFFSET << 0.0, 0, 0.2;   
             GRASPING_TRANSFORMATION << 0, 1, 0,
                                       -1, 0, 0,
@@ -317,7 +317,7 @@ public:
             LIFT_HEIGHT = 0.4;
             DROP_OFF_POSITION << 0.55, -0.1, 0; 
             OBJECT_BOTTOM_TO_CENTRE = 0.075;
-	        STARTING_CONFIGURATION = Eigen::VectorXd(7);
+	    STARTING_CONFIGURATION = Eigen::VectorXd(7);
             STARTING_CONFIGURATION << -0.420854,  0.181446, -0.535689,  -1.50956,  0.301637 ,  1.80662, -0.191084;
             moveToStartingPointParams = {0, true, qInit, STARTING_CONFIGURATION };
             configure_logs_path();            
@@ -358,7 +358,7 @@ public:
         coriolis_ = Eigen::Map<const Eigen::Matrix<double, 7, 1>>(coriolisArray.data());
         q_ = Eigen::Map<const Eigen::Matrix<double, 7, 1>>(robot_state.q.data());
         dq_ = Eigen::Map<const Eigen::Matrix<double, 7, 1>>(robot_state.dq.data());
-        
+    
         Eigen::Matrix4d T_EE_0(Eigen::Matrix4d::Map(robot_state.O_T_EE.data()));
         {
             lock_guard<mutex> lock(sharedEEPose.mtx);
@@ -519,10 +519,10 @@ private:
     tuple<Eigen::VectorXd, Eigen::VectorXd, Eigen::VectorXd> get_q(double t, Eigen::VectorXd& q_init, Eigen::VectorXd& q_fin) {
 	Eigen::VectorXd MAX_VELOCITIES(7);
 	MAX_VELOCITIES << 2, 2, 2, 2, 2, 2, 2.6;
-	MAX_VELOCITIES *= 0.1;
+	MAX_VELOCITIES *= 0.3;
 	Eigen::VectorXd MAX_ACCELERATIONS(7);
 	MAX_ACCELERATIONS << 15, 7.5, 10, 12.5, 15, 20, 20;
-	MAX_ACCELERATIONS *= 0.1;
+	MAX_ACCELERATIONS *= 0.3;
 	Eigen::VectorXd q(7);
 	Eigen::VectorXd q_dot(7);
 	Eigen::VectorXd q_ddot(7);
@@ -1065,8 +1065,12 @@ private:
     array<double, 7> processLifting() { 
         Eigen::Matrix4d T_EE_0(Eigen::Matrix4d::Map(robot_state.O_T_EE.data()));
 
-        double MAX_CARTESIAN_DISPLACEMENT = 0.00007;
-        Eigen::VectorXd tauCmd;
+        
+	//
+	//double MAX_CARTESIAN_DISPLACEMENT = 0.00007;
+        double MAX_CARTESIAN_DISPLACEMENT = 0.0001;
+    
+	Eigen::VectorXd tauCmd;
         switch (liftingParams.subState) {
             case LiftingSubState::Lift: {                           
                 if ((liftingParams.currentPose.translation() - liftingParams.liftingGoalPose.translation()).norm() <= sqrt(3 * pow(0.005, 2))) {
