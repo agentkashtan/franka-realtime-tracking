@@ -250,7 +250,7 @@ int sgn(double a) {
 
 array<double, 7> ZERO_TORQUES = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
 
-void adjustComputeThreadPriority(std::thread& compute_thread) {
+void adjustComputeThreadPriority(std::thread& compute_thread, bool f=true) {
     struct sched_param param;
     int policy;
 
@@ -262,23 +262,30 @@ void adjustComputeThreadPriority(std::thread& compute_thread) {
     }
 
     // Decrease the priority of the compute thread, ensuring it doesn't go below 0
-    param.sched_priority = 1;//std::max(static_cast<int>(param.sched_priority) - 1, 0);
-
+    if (f) param.sched_priority = 1; else {
+        param.sched_priority = 1;//std::max(static_cast<int>(param.sched_priority) - 1, 1);
+        cout << "new priority " << param.sched_priority << endl;
+    }
     // Debug message for starting the compute thread with the new priority
     std::cout << "Starting ModelPinocchio compute_thread with priority: "
               << param.sched_priority << std::endl;
-
-    // Set the new scheduling parameters for the compute thread
+   
+        // Set the new scheduling parameters for the compute thread
     errno = pthread_setschedparam(compute_thread.native_handle(), policy, &param);
     if (errno) {
         perror("ERROR: pthread_setschedparam");
         throw std::runtime_error("errno != 0");
     }
+    if (!f) {
+        errno = pthread_getschedparam(compute_thread.native_handle(), &policy, &param);
+        cout << "real new priority " << static_cast<int>(param.sched_priority) <<endl;
+    }
+
 }
 
 class StateController {
 public:
-    StateController(franka::Model& model, franka::Gripper& gripper, zmq::socket_t& socket_control, Eigen::VectorXd qInit, bool grasp, string exp_hash, int exp_num)
+    StateController(franka::Model& model, franka::Gripper& gripper, zmq::socket_t& socket_control, Eigen::VectorXd qInit, bool grasp, string exp_hash, int exp_num, string exp_dir)
         : model(model),
           gripper_(gripper),
 	  socket_control_(socket_control),
@@ -286,6 +293,7 @@ public:
           graspObject_(grasp),
           exp_hash_(exp_hash),
           run_number_(exp_num),
+          exp_dir_(exp_dir),
           state(State::MoveToStartingPoint) {
             log_ik_ = std::ofstream("/dev/shm/ik.log");
 	        log_ = std::ofstream("/dev/shm/controller.log");
@@ -306,7 +314,7 @@ public:
             Kd.diagonal() << 20, 20, 20, 20, 20, 20, 8;
             
             //CONVEYOR_BELT_SPEED << -0.04633, 0.0, 0.0;
-            CONVEYOR_BELT_SPEED << -0.19, 0.0, 0.0;
+            CONVEYOR_BELT_SPEED << -0.515, 0.0, 0.0;
             OFFSET << 0.0, 0, 0.23;   
             GRASPING_TRANSFORMATION << 0, 1, 0,
                                       -1, 0, 0,
@@ -362,6 +370,15 @@ public:
         dq_ = Eigen::Map<const Eigen::Matrix<double, 7, 1>>(robot_state.dq.data());
     
         Eigen::Matrix4d T_EE_0(Eigen::Matrix4d::Map(robot_state.O_T_EE.data()));
+        if(state==State::VisualServoing || state==State::Approaching) {
+            if( T_EE_0(2,3) <= 0.04 || T_EE_0(1,3) >= -0.33) {
+                throw runtime_error("outside of workspace: translation");
+            }
+            if (T_EE_0.block<3,1>(0,2).dot(-Eigen::Vector3d::UnitZ()) < 0.7) {
+                std::cout << T_EE_0.block<3,1>(0,2).transpose() << std::endl;
+                throw runtime_error("Outside of workspace: orientation");
+            }
+        }
         {
             lock_guard<mutex> lock(sharedEEPose.mtx);
             sharedEEPose.pose = T_EE_0;
@@ -392,6 +409,10 @@ public:
                 }
                 log_measurements_ << endl;
             }                
+            if ((cameraData.pose.translation()(2) < -0.06) && state!=State::VisualServoing) {
+                std::cout << "object low: " << cameraData.pose.translation()(2) << std::endl;
+                //throw runtime_error("Object detected too low: stop");
+            }
         }
 
         switch (state) {
@@ -425,6 +446,7 @@ private:
     string exp_hash_;
     State state;
     int run_number_;
+    string exp_dir_;
     Eigen::Matrix<double, 6, 7> jacobian_;
     Eigen::Matrix<double, 7, 7> M_;
     Eigen::Matrix<double, 7, 1> q_;
@@ -461,7 +483,7 @@ private:
     double LIFT_HEIGHT;
     double OBJECT_BOTTOM_TO_CENTRE;
 
-    double MAX_CARTESIAN_VELOCITY = 0.23;
+    double MAX_CARTESIAN_VELOCITY = 0.65;
     int N = 20;
 
     int missingFrames;
@@ -487,13 +509,13 @@ private:
     } 
 
     void configure_logs_path() {
-        log_robot_state_ = std::ofstream("/dev/shm/experiment/" + exp_hash_ + "_robotstate_" + to_string(run_number_) + ".log");
-        log_measurements_ = std::ofstream("/dev/shm/experiment/" + exp_hash_ + "_measurements_" + to_string(run_number_) + ".log");
+        log_robot_state_ = std::ofstream("/dev/shm/experiment/" + exp_dir_ + "/"  + exp_hash_ + "_robotstate_" + to_string(run_number_) + ".log");
+        log_measurements_ = std::ofstream("/dev/shm/experiment/"  + exp_dir_ + "/" + exp_hash_ + "_measurements_" + to_string(run_number_) + ".log");
         
-        log_kalmanfilter_ = std::ofstream("/dev/shm/experiment/" + exp_hash_ + "_kalmanfilter_" + to_string(run_number_) + ".log");
-        log_controller_input_ = std::ofstream("/dev/shm/experiment/" + exp_hash_ + "_controllerinput_" + to_string(run_number_) + ".log");
+        log_kalmanfilter_ = std::ofstream("/dev/shm/experiment/"  + exp_dir_ + "/" + exp_hash_ + "_kalmanfilter_" + to_string(run_number_) + ".log");
+        log_controller_input_ = std::ofstream("/dev/shm/experiment/"  + exp_dir_ + "/" + exp_hash_ + "_controllerinput_" + to_string(run_number_) + ".log");
         
-        log_filtered_position_ = std::ofstream("/dev/shm/experiment/" + exp_hash_ + "_filteredposition_" + to_string(run_number_) + ".log");
+        log_filtered_position_ = std::ofstream("/dev/shm/experiment/"  + exp_dir_ + "/" + exp_hash_ + "_filteredposition_" + to_string(run_number_) + ".log");
         
         ++ run_number_;
     }
@@ -717,7 +739,7 @@ private:
             log_vs_rp_ << time() << " " << (regParams.init_position + (time_stamp - regParams.start_time) * CONVEYOR_BELT_SPEED).transpose() << " " << regParams.init_orientation.eulerAngles(0, 1, 2).transpose()  << endl;
             q_base = q_;
             Eigen::VectorXd tauCmd;
-            tauCmd = cartesianController(regParams.init_position + (time_stamp - regParams.start_time) * CONVEYOR_BELT_SPEED, regParams.init_orientation, CONVEYOR_BELT_SPEED);
+            tauCmd = cartesianController(regParams.init_position + (time_stamp - regParams.start_time) * CONVEYOR_BELT_SPEED * 1.5, regParams.init_orientation, CONVEYOR_BELT_SPEED * 1.5);
             tauCmd += coriolis_;
             std::array<double, 7> tau_d_array{};
             Eigen::VectorXd::Map(&tau_d_array[0], 7) = tauCmd;
@@ -753,7 +775,8 @@ private:
             if (result.second) GRASPING_TRANSFORMATION *= ALTERNATIVE_GRASPING_TRANSFORMATION; 
             auto endComp = chrono::high_resolution_clock::now();
             chrono::duration<double> computationTime = endComp - startComp;
-            double reachTime = intersectTime - computationTime.count();    
+            cout << "comp time " << computationTime.count() << endl;
+	        double reachTime = intersectTime - computationTime.count();    
             double intervalNumber = n - 1;
             double deltaT = reachTime / intervalNumber;
             
@@ -814,7 +837,7 @@ private:
         Eigen::Matrix4d T_EE_0(Eigen::Matrix4d::Map(robot_state.O_T_EE.data()));
         GRASPING_ORIENTATION = objectPose.linear() * GRASPING_TRANSFORMATION;
         computeApproachConfig_thread_ = std::thread(&StateController::computeApproachTrajectory, this, N, objectPose, T_EE_0, q_);
-        adjustComputeThreadPriority(computeApproachConfig_thread_);
+        adjustComputeThreadPriority(computeApproachConfig_thread_, false);
         state = State::ComputingApproachPoint;
     }
     
@@ -895,7 +918,6 @@ private:
         std::lock_guard<std::mutex> lock(cameraDataMutex);
         convert_to_global(cameraData);
         Eigen::Matrix4d T_EE_0(Eigen::Matrix4d::Map(robot_state.O_T_EE.data()));
-
         if (cameraData.new_data) {
             cameraData.new_data = false;
             visualServoingParams.newData = true;
@@ -930,7 +952,7 @@ private:
             if (currentObjOrientaionQ.dot(measuredObjOrientaionQ) < 0.0) {
                 measuredObjOrientaionQ.coeffs() *= -1;
             }
-            visualServoingParams.estimatedObjectOrientation = currentObjOrientaionQ.slerp(0.3, measuredObjOrientaionQ).toRotationMatrix();    
+            visualServoingParams.estimatedObjectOrientation = currentObjOrientaionQ.slerp(0.2, measuredObjOrientaionQ).toRotationMatrix();    
 
             std::chrono::duration<double> test = cameraData.processTime -  start;
             Eigen::Vector3d real;
@@ -953,7 +975,7 @@ private:
         
         
         // Rate limiter
-        double MAX_RATE = 0.005; // 0.5 m / s
+        double MAX_RATE = 0.010; // 0.5 m / s
         Eigen::Vector3d desiredChange = estimatedObjectData.head(3) - visualServoingParams.filteredObjectPosition;
         Eigen::Vector3d saturedChange = desiredChange;
         saturedChange = saturedChange.cwiseMin(MAX_RATE);
@@ -999,7 +1021,7 @@ private:
             visualServoingParams.offset += saturedOffsetChange; 
             
             if (visualServoingParams.subState == VisualServoingSubState::Approaching) {
-                if (graspObject_ && (visualServoingParams.filteredObjectPosition + GRASP_OFFSET - T_EE_0.topRightCorner<3, 1>()).norm() <= sqrt(3 * pow(0.005, 2)) ) {
+                if (graspObject_ && (visualServoingParams.filteredObjectPosition + GRASP_OFFSET - T_EE_0.topRightCorner<3, 1>()).norm() <= sqrt(3 * pow(0.010, 2)) ) {
                     workerFinished.store(false, std::memory_order_release);
                     workerThread_ = thread(&StateController::graspObject, this);
                     adjustComputeThreadPriority(workerThread_);
@@ -1022,7 +1044,7 @@ private:
             
         }  
        
-        double predictionTimeDelta = 0.2;
+        double predictionTimeDelta = 0.3;
         if (visualServoingParams.newData) {
             visualServoingParams.newData = false;
             visualServoingParams.coeffs = vector<Eigen::VectorXd>(3);
@@ -1063,6 +1085,10 @@ private:
  
         log_pp_ << time() << " "  <<  estimatedObjectData.head(3).transpose()  << endl;
         log_vs_rp_ << time() << " "  << (controllerInputPosition).transpose() << " " << (visualServoingParams.filteredObjectOrientation * GRASPING_TRANSFORMATION).eulerAngles(0, 1, 2).transpose() << endl;
+
+        if(visualServoingParams.filteredObjectPosition(2) < -0.06) {
+            throw std::runtime_error("filteredObjectOrientation to low: stop");
+        }
         
         Eigen::Matrix3d controllerInputOrientation = visualServoingParams.filteredObjectOrientation * GRASPING_TRANSFORMATION;
         log_controller_input_ << get_unix_time_ms(); 
@@ -1071,7 +1097,7 @@ private:
             log_controller_input_ << controllerInputPosition(i) << " ";
         }
         log_controller_input_ << "0 0 0 1" << endl;
-
+        //if (T_EE_0(2,3) <= 0.1 || T_EE_0(1,3) >= -0.33) throw runtime_error("stop");
         tauCmd = cartesianController(controllerInputPosition, controllerInputOrientation, controllerInputVelocity, false,  controllerInputAcceleration);
         visualServoingParams.previousAcceleration = controllerInputAcceleration;
         tauCmd += coriolis_;
@@ -1101,7 +1127,7 @@ private:
         
 	//
 	//double MAX_CARTESIAN_DISPLACEMENT = 0.00007;
-    double MAX_CARTESIAN_DISPLACEMENT = 0.00015;
+    double MAX_CARTESIAN_DISPLACEMENT = 0.00035;
     
 	Eigen::VectorXd tauCmd;
         switch (liftingParams.subState) {
@@ -1137,7 +1163,7 @@ private:
                     workerThread_.join();
                     Eigen::Vector3d desiredTransportPosition = DROP_OFF_POSITION;
                     desiredTransportPosition(2) = LIFT_HEIGHT;
-                    double transportExecutionTime = (T_EE_0.topRightCorner<3, 1>() - desiredTransportPosition).norm() / 0.1;
+                    double transportExecutionTime = (T_EE_0.topRightCorner<3, 1>() - desiredTransportPosition).norm() / 0.4;
                     double finalTime = time_stamp + transportExecutionTime; 
                     lock_guard<mutex> lock(workerMutex);
                     vector<Eigen::VectorXd> coeffs(7);
@@ -1312,7 +1338,7 @@ void camera_data_receiver(zmq::context_t& ctx) {
 
         Eigen::Isometry3d cam_c_T_c;
         cam_c_T_c.setIdentity();
-        cam_c_T_c.translation() << -0.009, 0, 0;
+        cam_c_T_c.translation() << -0.02, 0, 0;
 
         Eigen::Isometry3d g_T_c =  g_T_cad * cad_T_cam_c * cam_c_T_c;
         Eigen::Isometry3d o_T_g(o_T_g_matrix);
@@ -1323,6 +1349,25 @@ void camera_data_receiver(zmq::context_t& ctx) {
 
 
 int main(int argc, char ** argv) {
+    pthread_t this_thread = pthread_self();
+    struct sched_param param;
+    int policy;
+    errno = pthread_getschedparam(this_thread, &policy, &param);
+    if (errno) {
+        perror("ERROR: pthread_getschedparam");
+        throw std::runtime_error("errno != 0");
+    }
+    param.sched_priority = 99;
+
+   // errno = pthread_setschedparam(this_thread, SCHED_FIFO, &param);
+
+    // Decrease the priority of the compute thread, ensuring it doesn't go below 0
+    //if (f) param.sched_priority = 1; else param.sched_priority = std::max
+    errno = pthread_getschedparam(this_thread, &policy, &param);
+
+    cout << "priority " << static_cast<int>(param.sched_priority) << endl;
+
+    
     //Sockets set up
     cout << "ENV MODE: " << getenv("mode") << endl;
     if (string(getenv("mode")) == "5g") {
@@ -1333,7 +1378,7 @@ int main(int argc, char ** argv) {
         cout << "using wifi";
     }
 
-    if (string(getenv("exp_hash")) == "" || string(getenv("exp_num")) == "" ) {
+    if (string(getenv("exp_hash")) == "" || string(getenv("exp_num")) == "" || string(getenv("exp_dir")) == "")  {
         throw runtime_error("experiment hash or run number is not provided");
     }
 
@@ -1370,8 +1415,12 @@ int main(int argc, char ** argv) {
     if (argc == 3) {
         if (string(argv[2]) == "true") grasp = true;
     }
-    StateController controller(model, gripper, socket_control, q_init, grasp, string(getenv("exp_hash")), stoi(getenv("exp_num")));  
-    gripper.homing();
+    StateController controller(model, gripper, socket_control, q_init, grasp, string(getenv("exp_hash")), stoi(getenv("exp_num")), string(getenv("exp_dir")));  
+    if(getenv("GRIPPER_HOMING")) {
+        gripper.homing();
+    } else {
+        gripper.move(0.08, 0.15);
+    }
   
     //Camera set up
     rs2::pipeline pipe;
