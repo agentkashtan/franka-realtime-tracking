@@ -188,6 +188,7 @@ struct RegParams {
     double start_time;
     Eigen::Vector3d init_position;
     Eigen::Matrix3d init_orientation;
+    vector<Eigen::VectorXd> coeffs;
 };
 
 struct ObservationParams {
@@ -314,7 +315,7 @@ public:
             Kd.diagonal() << 20, 20, 20, 20, 20, 20, 8;
             
             //CONVEYOR_BELT_SPEED << -0.04633, 0.0, 0.0;
-            CONVEYOR_BELT_SPEED << -0.515, 0.0, 0.0;
+            CONVEYOR_BELT_SPEED << -0.5, 0.0, 0.0;
             OFFSET << 0.0, 0, 0.23;   
             GRASPING_TRANSFORMATION << 0, 1, 0,
                                       -1, 0, 0,
@@ -410,7 +411,7 @@ public:
                 log_measurements_ << endl;
             }                
             if ((cameraData.pose.translation()(2) < -0.06) && state!=State::VisualServoing) {
-                std::cout << "object low: " << cameraData.pose.translation()(2) << std::endl;
+                //std::cout << "object low: " << cameraData.pose.translation()(2) << std::endl;
                 //throw runtime_error("Object detected too low: stop");
             }
         }
@@ -483,7 +484,8 @@ private:
     double LIFT_HEIGHT;
     double OBJECT_BOTTOM_TO_CENTRE;
 
-    double MAX_CARTESIAN_VELOCITY = 0.65;
+    double REGISTRATION_DURATION_ESTIMATE = 0.15;
+    double MAX_CARTESIAN_VELOCITY = 0.7;
     int N = 20;
 
     int missingFrames;
@@ -725,7 +727,25 @@ private:
         if (cameraData.new_data && cameraData.detected) {
             cameraData.new_data = false;
             Eigen::Matrix4d T_EE_0(Eigen::Matrix4d::Map(robot_state.O_T_EE.data()));
-            regParams = { time_stamp, T_EE_0.topRightCorner<3,1>(), T_EE_0.topLeftCorner<3,3>() };
+ 
+            vector<Eigen::VectorXd> coeffs(3);
+
+            Eigen::Vector3d predictedPosition = T_EE_0.topRightCorner<3,1>() + CONVEYOR_BELT_SPEED * REGISTRATION_DURATION_ESTIMATE;
+            for (int i = 0; i < 3; i ++) {
+                Eigen::Matrix<double, 6, 6> A;
+                double predictionTimeDelta = REGISTRATION_DURATION_ESTIMATE;
+                A <<  pow(0, 5),     pow(0, 4),     pow(0, 3),     pow(0, 2),  0, 1.0,
+                    pow(predictionTimeDelta, 5),     pow(predictionTimeDelta, 4),     pow(predictionTimeDelta, 3),     pow(predictionTimeDelta, 2),  predictionTimeDelta, 1.0,
+                    5.0*pow(0, 4), 4.0*pow(0, 3), 3.0*pow(0, 2), 2.0*0,      1.0, 0.0,
+                    5.0*pow(predictionTimeDelta, 4), 4.0*pow(predictionTimeDelta, 3), 3.0*pow(predictionTimeDelta, 2), 2.0*predictionTimeDelta,      1.0, 0.0,
+                    20.0*pow(0, 3),12.0*pow(0, 2), 6.0*0,         2.0,         0.0, 0.0,
+                    20.0*pow(predictionTimeDelta, 3),12.0*pow(predictionTimeDelta, 2),6.0*predictionTimeDelta,         2.0,         0,0;
+                Eigen::Matrix<double, 6, 1> B;
+                B << T_EE_0.topRightCorner<3,1>()(i), predictedPosition(i), 0, CONVEYOR_BELT_SPEED(i), 0, 0;
+                coeffs[i] = A.fullPivLu().solve(B);
+            }
+           
+            regParams = { time_stamp, T_EE_0.topRightCorner<3,1>(), T_EE_0.topLeftCorner<3,3>(), coeffs };
             state = State::Registration;
         }
         return maintain_base_pos();
@@ -739,7 +759,22 @@ private:
             log_vs_rp_ << time() << " " << (regParams.init_position + (time_stamp - regParams.start_time) * CONVEYOR_BELT_SPEED).transpose() << " " << regParams.init_orientation.eulerAngles(0, 1, 2).transpose()  << endl;
             q_base = q_;
             Eigen::VectorXd tauCmd;
-            tauCmd = cartesianController(regParams.init_position + (time_stamp - regParams.start_time) * CONVEYOR_BELT_SPEED * 1.5, regParams.init_orientation, CONVEYOR_BELT_SPEED * 1.5);
+            if (false && time_stamp <= regParams.start_time + REGISTRATION_DURATION_ESTIMATE) {
+
+                Eigen::Vector3d controllerInputPosition;
+                Eigen::Vector3d controllerInputVelocity;
+                Eigen::Vector3d controllerInputAcceleration;
+                vector<Eigen::VectorXd> c = regParams.coeffs;
+                double t = time_stamp - regParams.start_time;
+                for (int i =0; i < 3; i ++) {
+                    controllerInputPosition(i) = c[i](0) * pow(t, 5) + c[i](1) * pow(t, 4) + c[i](2) * pow(t, 3) + c[i](3) * pow(t, 2) + c[i](4) * t + c[i](5);
+                    controllerInputVelocity(i) = 5 * c[i](0) * pow(t, 4) + 4 * c[i](1) * pow(t, 3) + 3 * c[i](2) * pow(t, 2) + 2 * c[i](3) * t  + c[i](4);
+                    controllerInputAcceleration(i) = 20 * c[i](0) * pow(t, 3) + 12 * c[i](1) * pow(t, 2) + 6 * c[i](2) * t + 2 * c[i](3);
+                }
+                tauCmd = cartesianController(controllerInputPosition, regParams.init_orientation, controllerInputVelocity, false, controllerInputAcceleration);
+            } else { 
+                tauCmd = cartesianController(regParams.init_position + (time_stamp - regParams.start_time) * CONVEYOR_BELT_SPEED, regParams.init_orientation, CONVEYOR_BELT_SPEED);
+            }
             tauCmd += coriolis_;
             std::array<double, 7> tau_d_array{};
             Eigen::VectorXd::Map(&tau_d_array[0], 7) = tauCmd;
@@ -943,7 +978,6 @@ private:
             std::chrono::duration<double> duration = currentTime - cameraData.processTime;
             
             const StateEntry& pastState = visualServoingParams.ringBuffer->get_state(time_stamp - duration.count());
-            cout << "past state " << time_stamp << " "<< pastState.state.topLeftCorner<3, 1>().transpose() << endl;
             visualServoingParams.estimator->set_state(pastState.state, pastState.P, time_stamp - duration.count()); 
             visualServoingParams.estimator->correct(cameraData.pose.translation());
 
@@ -1086,7 +1120,7 @@ private:
         log_pp_ << time() << " "  <<  estimatedObjectData.head(3).transpose()  << endl;
         log_vs_rp_ << time() << " "  << (controllerInputPosition).transpose() << " " << (visualServoingParams.filteredObjectOrientation * GRASPING_TRANSFORMATION).eulerAngles(0, 1, 2).transpose() << endl;
 
-        if(visualServoingParams.filteredObjectPosition(2) < -0.06) {
+        if(visualServoingParams.filteredObjectPosition(2) < -0.08) {
             throw std::runtime_error("filteredObjectOrientation to low: stop");
         }
         
@@ -1344,7 +1378,8 @@ void camera_data_receiver(zmq::context_t& ctx) {
         Eigen::Isometry3d o_T_g(o_T_g_matrix);
         std::lock_guard<std::mutex> lock(cameraDataMutex);
         cameraData = { true, g_T_c * camera_T_tag, false, true, false, frameNumber, start, o_T_g };
-   }
+ 
+    }
 }
 
 
@@ -1430,10 +1465,10 @@ int main(int argc, char ** argv) {
     cfg.enable_stream(RS2_STREAM_DEPTH, 640, 480, RS2_FORMAT_Z16, fps);
     cfg.enable_device("123622270300");
     
-    int frameNumber = 0;
+    int frameNumberG = 0;
     auto start = chrono::high_resolution_clock::now();
 
-    auto realsense_callback = [&socket, &frameNumber, &start](const rs2::frame& frame) {   
+    auto realsense_callback = [&socket, &frameNumberG, &start](const rs2::frame& frame) {   
             rs2::frameset fs = frame.as<rs2::frameset>();
             if(!fs) return;
             rs2::video_frame cur_frame = fs.get_color_frame();
@@ -1464,16 +1499,16 @@ int main(int argc, char ** argv) {
             std::memcpy(msg_timestamp.data(), &timestamp_ns, sizeof(timestamp_ns));
                 
             chrono::duration<double> duration = now - start;
-            zmq::message_t msgFrameNumber(sizeof(frameNumber));
-            std::memcpy(msgFrameNumber.data(), &frameNumber, sizeof(frameNumber));
+            zmq::message_t msgFrameNumber(sizeof(frameNumberG));
+            std::memcpy(msgFrameNumber.data(), &frameNumberG, sizeof(frameNumberG));
             
             zmq::message_t msgIterationIdx(sizeof(int));
 
             {
                 lock_guard<mutex> lock(iterationMutex); 
                 std::memcpy(msgIterationIdx.data(), &iterationIdx, sizeof(iterationIdx));
+                //cout << "sender-> " << frameNumberG <<  " " << iterationIdx << endl;
             }
-
             vector<uchar> compressed_cframe;
             cv::imencode(".jpg", color_data, compressed_cframe);
 
@@ -1502,7 +1537,7 @@ int main(int argc, char ** argv) {
             socket.send(msg_ee_pose, zmq::send_flags::sndmore);
             socket.send(msgIterationIdx, zmq::send_flags::none);
             
-            frameNumber ++;
+            frameNumberG ++;
     };
    
     rs2::pipeline_profile profile = pipe.start(cfg, realsense_callback);

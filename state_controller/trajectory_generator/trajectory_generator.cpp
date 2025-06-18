@@ -350,7 +350,7 @@ Eigen::VectorXd solveInverseKinematics(
     
     for (int i = 0; i < ndof; i ++) {
         double range = upperJointsLimits[i] - lowerJointsLimits[i];
-        obj += 10 * pow((qFinal(i) - lowerJointsLimits[i] - range / 2) / range, 2); 
+        obj += 30 * pow((qFinal(i) - lowerJointsLimits[i] - range / 2) / range, 2); 
     }
 
     std::vector<SX> g_list;

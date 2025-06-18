@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.10)
 project(TestPinocchioEigen)
-#set(CMAKE_BUILD_TYPE Debug)
+set(CMAKE_BUILD_TYPE Debug)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -110,12 +110,12 @@ find_package(Franka REQUIRED)
 find_package(Eigen3 REQUIRED)
 find_package(realsense2 REQUIRED)
 find_package(cppzmq REQUIRED)
-
+find_package(msgpack-cxx REQUIRED)
 
 
 add_executable(state_controller state_controller.cpp kalman/kalman.cpp trajectory_generator/trajectory_generator.cpp) 
 target_include_directories(state_controller PRIVATE ${CMAKE_SOURCE_DIR}/kalman ${CMAKE_SOURCE_DIR}/trajectory_generator)
 
 
-target_link_libraries(state_controller PRIVATE cppzmq ${OpenCV_LIBS} opencv_highgui pinocchio::pinocchio Eigen3::Eigen Franka::Franka realsense2::realsense2  ${CASADI_LIBRARIES} Eigen3::Eigen ipopt)
+target_link_libraries(state_controller PRIVATE msgpack-cxx cppzmq ${OpenCV_LIBS} opencv_highgui pinocchio::pinocchio Eigen3::Eigen Franka::Franka realsense2::realsense2  ${CASADI_LIBRARIES} Eigen3::Eigen ipopt)
  
