@@ -240,7 +240,7 @@ std::pair<std::vector<Eigen::VectorXd>, bool> generate_joint_waypoint(
             SX z_unit = z_vec / z_norm_ee;
  
             SX err = 1 - dot(R_ee(Slice(),2), z_unit);
-            obj += 0.5 * dot(err, err);
+            if (i > 9 ) obj += 0.5 * dot(err, err);
             obj += 0.2 * dot(dq_i, dq_i);
 
         }
