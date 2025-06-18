@@ -759,7 +759,7 @@ private:
             log_vs_rp_ << time() << " " << (regParams.init_position + (time_stamp - regParams.start_time) * CONVEYOR_BELT_SPEED).transpose() << " " << regParams.init_orientation.eulerAngles(0, 1, 2).transpose()  << endl;
             q_base = q_;
             Eigen::VectorXd tauCmd;
-            if (false && time_stamp <= regParams.start_time + REGISTRATION_DURATION_ESTIMATE) {
+            if (time_stamp <= regParams.start_time + REGISTRATION_DURATION_ESTIMATE) {
 
                 Eigen::Vector3d controllerInputPosition;
                 Eigen::Vector3d controllerInputVelocity;
