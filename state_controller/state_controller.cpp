@@ -231,7 +231,7 @@ struct VisualServoingParams {
     Eigen::Vector3d previousAcceleration;
     double newDataTimestamp;
     vector<Eigen::VectorXd> coeffs;
-    Eigen::Vector3d offset;
+    double offset;
 };
 
 struct LiftingParams {
@@ -315,18 +315,24 @@ public:
 	        Kp.diagonal() << 200, 200, 200, 200, 200, 200,200;
             Kd.diagonal() << 20, 20, 20, 20, 20, 20, 8;
             
-            //CONVEYOR_BELT_SPEED << -0.259, 0.0, 0.0; //high speed
+            CONVEYOR_BELT_SPEED << -0.259, 0.0, 0.0; //high speed
             //double MAX_CARTESIAN_VELOCITY = 0.7;
-	    CONVEYOR_BELT_SPEED << -0.5, 0.0, 0.0;
+	        //CONVEYOR_BELT_SPEED << -0.5, 0.0, 0.0;
             OFFSET << 0.0, 0, 0.23;   
+            OFFSET_SCALAR  = 0.23;
             GRASPING_TRANSFORMATION << 0, 1, 0,
                                       -1, 0, 0,
                                       0, 0, 1;
             
             Eigen::AngleAxisd rotZPI(M_PI, Eigen::Vector3d::UnitZ());
             ALTERNATIVE_GRASPING_TRANSFORMATION = rotZPI.toRotationMatrix();
-            if (graspObject_) GRASP_OFFSET << 0, 0, 0.1;
-            else GRASP_OFFSET = OFFSET;
+            if (graspObject_) {
+                GRASP_OFFSET << 0, 0, 0.1;
+                GRASP_OFFSET_SCALAR = 0.1;
+            } else {
+                GRASP_OFFSET = OFFSET;
+                GRASP_OFFSET_SCALAR = OFFSET_SCALAR;
+            }
             LIFT_HEIGHT = 0.5;
             DROP_OFF_POSITION << 0.55, -0.1, 0; 
             OBJECT_BOTTOM_TO_CENTRE = 0.075;
@@ -476,19 +482,21 @@ private:
 
     std::chrono::high_resolution_clock::time_point start;
     Eigen::Vector3d OFFSET;
+    double OFFSET_SCALAR;
     Eigen::Vector3d CONVEYOR_BELT_SPEED;
     Eigen::Matrix3d GRASPING_ORIENTATION;
     Eigen::Matrix3d GRASPING_TRANSFORMATION;
     Eigen::Matrix3d ALTERNATIVE_GRASPING_TRANSFORMATION;
     Eigen::Vector3d GRASP_OFFSET;
+    double GRASP_OFFSET_SCALAR;
     Eigen::Vector3d DROP_OFF_POSITION;
     Eigen::VectorXd STARTING_CONFIGURATION;
     double LIFT_HEIGHT;
     double OBJECT_BOTTOM_TO_CENTRE;
 
     double REGISTRATION_DURATION_ESTIMATE = 0.15;
-    double MAX_CARTESIAN_VELOCITY = 0.7; //high speed
-    //double MAX_CARTESIAN_VELOCITY = 0.40;    
+    //double MAX_CARTESIAN_VELOCITY = 0.7; //high speed
+    double MAX_CARTESIAN_VELOCITY = 0.40;    
     
     int N = 20;
 
@@ -801,16 +809,18 @@ private:
             auto startComp = chrono::high_resolution_clock::now();
             double intersectTime = feasibleMinTime(objectPose.translation(), CONVEYOR_BELT_SPEED, T_EE_0.topRightCorner<3,1>(), MAX_CARTESIAN_VELOCITY);
             if (intersectTime == -1) throw runtime_error("Failed to intersept the object");
-            cout << (objectPose.translation() + intersectTime * CONVEYOR_BELT_SPEED).transpose() << endl;
-            
+            Eigen::Isometry3d postApproachPose;
+
             pair<vector<Eigen::VectorXd>, bool> result = generate_joint_waypoint(
                     N, 
                     intersectTime,
                     objectPose,
                     CONVEYOR_BELT_SPEED,
                     q,
-                    OFFSET,
-                    GRASPING_TRANSFORMATION
+                    OFFSET_SCALAR,
+                    GRASPING_TRANSFORMATION,
+                    postApproachPose
+
                     );
             vector<Eigen::VectorXd>& jointWaypoints = result.first;
             cout <<"fin pose " << jointWaypoints.back().transpose() << endl;
@@ -864,8 +874,7 @@ private:
                 apResult.reachTime = reachTime;
                 apResult.spline = spline;
                 apResult.intervalDuration = deltaT;
-                apResult.predictedObjectPose.translation() = objectPose.translation() + CONVEYOR_BELT_SPEED * intersectTime;
-                apResult.predictedObjectPose.linear() = objectPose.linear();  
+                apResult.predictedObjectPose = postApproachPose; 
             }
             
             apResult.finished.store(true);
@@ -914,6 +923,13 @@ private:
          if (approachParams.intervalNumber >= N - 1) {
             q_base = q_;
             state = State::VisualServoing;
+             
+            Eigen::Matrix4d T_EE_0(Eigen::Matrix4d::Map(robot_state.O_T_EE.data()));
+            cout << "actual " << T_EE_0 << endl;
+            cout << "predicted p" << approachParams.predictedObjectPose.translation().transpose() << endl;
+            cout << "predicted o" << approachParams.predictedObjectPose.linear() << endl;
+  
+
             visualServoingParams = { 
                 time_stamp, 
                 time_stamp, 
@@ -928,7 +944,7 @@ private:
                 Eigen::Vector3d::Zero(),
                 0,
                 vector<Eigen::VectorXd>(),
-                OFFSET
+                OFFSET_SCALAR
             };
             std::lock_guard<std::mutex> lock(cameraDataMutex);
             cameraData.new_data = false;
@@ -1054,15 +1070,16 @@ private:
         if (visualServoingParams.subState == VisualServoingSubState::Following){
              if (time_stamp >= visualServoingParams.startTime + 0.0) visualServoingParams.subState = VisualServoingSubState::Approaching;
         } else {
-            Eigen::Vector3d desiredOffsetChange = GRASP_OFFSET - visualServoingParams.offset;
+            double desiredOffsetChange = GRASP_OFFSET_SCALAR - visualServoingParams.offset;
             
-            Eigen::Vector3d saturedOffsetChange = desiredOffsetChange;
-            saturedOffsetChange = saturedOffsetChange.cwiseMin(MAX_RATE / 20);
-            saturedOffsetChange = saturedOffsetChange.cwiseMax(- MAX_RATE / 20); 
+            double saturedOffsetChange = desiredOffsetChange;
+            saturedOffsetChange = min(saturedOffsetChange, MAX_RATE / 20);
+            saturedOffsetChange = max(saturedOffsetChange, - MAX_RATE / 20); 
             visualServoingParams.offset += saturedOffsetChange; 
             
             if (visualServoingParams.subState == VisualServoingSubState::Approaching) {
-                if (graspObject_ && (visualServoingParams.filteredObjectPosition + GRASP_OFFSET - T_EE_0.topRightCorner<3, 1>()).norm() <= sqrt(3 * pow(0.010, 2)) ) { //high speed: 0.010
+                
+                if (graspObject_ && (visualServoingParams.filteredObjectPosition - GRASP_OFFSET_SCALAR * (visualServoingParams.estimatedObjectOrientation*GRASPING_TRANSFORMATION).topRightCorner<3,1>() - T_EE_0.topRightCorner<3, 1>()).norm() <= sqrt(3 * pow(0.010, 2)) ) { //high speed: 0.010
                     workerFinished.store(false, std::memory_order_release);
                     workerThread_ = thread(&StateController::graspObject, this);
                     adjustComputeThreadPriority(workerThread_);
@@ -1085,11 +1102,20 @@ private:
             
         }  
        
-        double predictionTimeDelta = 0.3; //high speed 0.3
+        double predictionTimeDelta = 0.2; //high speed 0.3
         if (visualServoingParams.newData) {
             visualServoingParams.newData = false;
             visualServoingParams.coeffs = vector<Eigen::VectorXd>(3);
-            Eigen::Vector3d predictedObjectPosition = visualServoingParams.filteredObjectPosition + predictionTimeDelta * objectVelocity + visualServoingParams.offset; 
+
+            double  predictedOffset;
+            if (graspObject_) {
+                predictedOffset = GRASP_OFFSET_SCALAR - visualServoingParams.offset;
+                predictedOffset = min(predictionTimeDelta * MAX_RATE / 20, predictedOffset);
+                predictedOffset = max(-predictionTimeDelta * MAX_RATE / 20, predictedOffset);
+                predictedOffset += visualServoingParams.offset;
+            } else predictedOffset = OFFSET_SCALAR;
+            Eigen::Vector3d predictedObjectPosition = visualServoingParams.filteredObjectPosition + predictionTimeDelta * objectVelocity - predictedOffset * (visualServoingParams.estimatedObjectOrientation * GRASPING_TRANSFORMATION).topRightCorner<3, 1>(); 
+            
             for (int i = 0; i < 3; i ++) {
                 Eigen::Matrix<double, 6, 6> A;
                 A <<  pow(0, 5),     pow(0, 4),     pow(0, 3),     pow(0, 2),  0, 1.0,
@@ -1110,7 +1136,7 @@ private:
         Eigen::Vector3d controllerInputAcceleration;
 
         if (time_stamp - visualServoingParams.newDataTimestamp > predictionTimeDelta){
-            controllerInputPosition = visualServoingParams.filteredObjectPosition + visualServoingParams.offset;
+            controllerInputPosition = visualServoingParams.filteredObjectPosition - visualServoingParams.offset * (visualServoingParams.estimatedObjectOrientation * GRASPING_TRANSFORMATION).topRightCorner<3, 1>();
             controllerInputVelocity = objectVelocity;
             controllerInputAcceleration.setZero();
             cout << "run out off pred window" << endl;
@@ -1139,7 +1165,7 @@ private:
         }
         log_controller_input_ << "0 0 0 1" << endl;
         //if (T_EE_0(2,3) <= 0.1 || T_EE_0(1,3) >= -0.33) throw runtime_error("stop");
-        tauCmd = cartesianController(controllerInputPosition, controllerInputOrientation, controllerInputVelocity, false,  controllerInputAcceleration);
+        tauCmd = cartesianController(controllerInputPosition, controllerInputOrientation, controllerInputVelocity, true, controllerInputAcceleration);
         visualServoingParams.previousAcceleration = controllerInputAcceleration;
         tauCmd += coriolis_;
         std::array<double, 7> tau_d_array{};

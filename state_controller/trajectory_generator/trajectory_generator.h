@@ -23,8 +23,9 @@ std::pair<std::vector<Eigen::VectorXd>, bool> generate_joint_waypoint(
         Eigen::Isometry3d obj_init_pose,
         Eigen::Vector3d obj_vel,
         Eigen::VectorXd robot_joint_config,
-        Eigen::Vector3d offset,
-        Eigen::Matrix3d graspingTransformation
+        double offset,
+        Eigen::Matrix3d graspingTransformation,
+        Eigen::Isometry3d& finalPose
         );
 
 Eigen::VectorXd solveInverseKinematics(

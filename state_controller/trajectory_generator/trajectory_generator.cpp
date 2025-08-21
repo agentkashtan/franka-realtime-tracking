@@ -148,8 +148,10 @@ std::pair<std::vector<Eigen::VectorXd>, bool> generate_joint_waypoint(
         Eigen::Isometry3d obj_init_pose,
         Eigen::Vector3d obj_vel,
         Eigen::VectorXd robot_joint_config,
-        Eigen::Vector3d offset,
-        Eigen::Matrix3d graspingTransformation
+        //new feat ?
+        double offset,
+        Eigen::Matrix3d graspingTransformation,
+        Eigen::Isometry3d& finalPose
         )
 { 
     Eigen::AngleAxisd rotZPI(M_PI, Eigen::Vector3d::UnitZ());
@@ -161,17 +163,20 @@ std::pair<std::vector<Eigen::VectorXd>, bool> generate_joint_waypoint(
     std::vector<double> lowerJointsLimits = {-2.8973, -1.7628, -2.8973, -3.0718, -2.8973, -0.0175, -2.8973};
     std::vector<double> upperVelocityLimits = {2, 2, 2, 2, 2, 2, 2};
     std::vector<double> lowerVelocityLimits = {-2, -2, -2, -2, -2, -2, -2};
+    
+        Eigen::Vector3d obj_init_pos = obj_init_pose.translation();
 
     for (int ind = 0; ind < 2; ind ++) {  
     // -------------------------------------------------------------------------
-    Eigen::Vector3d obj_init_pos = obj_init_pose.translation();
     SX robotJointPositionSX = SX::zeros(7);
     for (int i = 0; i < ndof; i ++) robotJointPositionSX(i) = robot_joint_config(i);
 
     // -------------------------------------------------------------------------
-    Eigen::Vector3d robot_pos_fin = obj_init_pos + obj_vel * total_time + offset;
- 
     Eigen::Matrix3d orientationFinalEigen = obj_init_pose.linear() * graspingTransformation * symmetricGripperTransform[ind];
+    //new feat ?
+    Eigen::Vector3d robot_pos_fin = obj_init_pos + obj_vel * total_time - offset*orientationFinalEigen.topRightCorner<3, 1>();
+    std::cout << "no offset " << (obj_init_pos + obj_vel * total_time).transpose() << std::endl;
+    std::cout << "offset " << robot_pos_fin.transpose() << std::endl; 
     DM orient_fin = DM::zeros(3 ,3);
     for (int i = 0; i < 3; i ++) {
         for (int j = 0; j < 3; j ++) {
@@ -360,9 +365,24 @@ std::pair<std::vector<Eigen::VectorXd>, bool> generate_joint_waypoint(
         result[ind][i] = vec;
     }
     }
+    
+    if (computeScore(result[0].back(), ndof, upperJointsLimits, lowerJointsLimits) > computeScore(result[1].back(), ndof, upperJointsLimits, lowerJointsLimits)) {
+        Eigen::Matrix3d orientationFinalEigen = obj_init_pose.linear();
+        Eigen::Vector3d robot_pos_fin = obj_init_pos + obj_vel * total_time;
 
-    return computeScore(result[0].back(), ndof, upperJointsLimits, lowerJointsLimits) > computeScore(result[1].back(), ndof, upperJointsLimits, lowerJointsLimits) ? std::make_pair(result[0], false) : std::make_pair(result[1], true);
-}
+        finalPose.translation() = robot_pos_fin;
+        finalPose.linear() = orientationFinalEigen;
+        return std::make_pair(result[0], false);
+    } else {
+        Eigen::Matrix3d orientationFinalEigen = obj_init_pose.linear();
+        Eigen::Vector3d robot_pos_fin = obj_init_pos + obj_vel * total_time;
+
+        finalPose.translation() = robot_pos_fin;
+        finalPose.linear() = orientationFinalEigen;
+
+        return std::make_pair(result[1], true);
+    }
+ }
 
 
 Eigen::VectorXd solveInverseKinematics(
