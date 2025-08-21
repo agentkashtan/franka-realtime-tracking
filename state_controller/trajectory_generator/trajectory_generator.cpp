@@ -222,16 +222,25 @@ std::pair<std::vector<Eigen::VectorXd>, bool> generate_joint_waypoint(
         if (i == 0)
         {
             SX err = q_i - robotJointPositionSX;
-            obj += 10 * dot(err, err);
+            //iobj += 10 * dot(err, err);
             obj += 1.5 * dot(dq_i, dq_i);
         }
         else if (i == N-1)
         {
             SX pos_err = pos_ee - vertcat(SX(robot_pos_fin(0)), SX(robot_pos_fin(1)), SX(robot_pos_fin(2)));
-            obj += 50* dot(pos_err, pos_err);
+            obj += 70* dot(pos_err, pos_err);
             SX err = orientationErrorAngleAxis(R_ee, orient_fin);   
             obj += 50 * dot(err, err);
             obj += 1.5 * dot(dq_i, dq_i);
+            /*
+            double margin = 0.1;  // Start penalizing within 0.1 rad of the joint limits
+
+            for (int i = 0; i < ndof; ++i) {
+                SX lower_margin = fmax(0.0, margin - (q_i(i) - lowerJointsLimits[i]));
+                SX upper_margin = fmax(0.0, margin - (upperJointsLimits[i] - q_i(i)));
+                obj += pow(lower_margin, 2) + pow(upper_margin, 2);
+            }
+            */
         }
         else
         {
@@ -258,6 +267,39 @@ std::pair<std::vector<Eigen::VectorXd>, bool> generate_joint_waypoint(
     }
  
     // -------------------------------------------------------------------------
+    SX q_init_c = get_q(0);
+   
+    for (int i = 0; i < ndof; ++ i) {
+        g_list.push_back(q_init_c(i) - robot_joint_config(i));
+        lbg_list.push_back(0.0);
+        ubg_list.push_back(0.0);
+    }
+    /*
+    SX endEffectorOrientation = endEffectorPose.second;
+    SX orientationDesiredCA = SX::zeros(3,3);
+    std::cout <<"orien " << ind << std::endl;
+    for (int i = 0; i < 3; i ++) {
+        for (int j = 0; j < 3; j ++) {
+            orientationDesiredCA(i, j) = orient_fin(i, j);
+            std::cout << orient_fin(i, j) <<  " ";
+        }   
+        std::cout << std::endl; 
+    }
+    std::cout << std::endl;
+    SX angleAxisErr = orientationErrorAngleAxis(endEffectorOrientation, orientationDesiredCA);
+    
+    for (int i = 0; i < 3; i ++) {
+        g_list.push_back(angleAxisErr(i));
+        lbg_list.push_back(0.0);
+        ubg_list.push_back(0.0);
+    }
+    
+    for (int i = 0; i < 3; i ++) {
+        g_list.push_back(endEffectorPosition(i) - robot_pos_fin(i));
+        lbg_list.push_back(0.0);
+        ubg_list.push_back(0.0);
+    }*/
+
     SX g;
     if (!g_list.empty())
     {
@@ -318,6 +360,7 @@ std::pair<std::vector<Eigen::VectorXd>, bool> generate_joint_waypoint(
         result[ind][i] = vec;
     }
     }
+
     return computeScore(result[0].back(), ndof, upperJointsLimits, lowerJointsLimits) > computeScore(result[1].back(), ndof, upperJointsLimits, lowerJointsLimits) ? std::make_pair(result[0], false) : std::make_pair(result[1], true);
 }
 

@@ -55,6 +55,7 @@ struct CameraData {
     bool global_frame;
     bool new_data;
     bool is_logged;
+    int tracking_time;
     int frameNumber;
     std::chrono::time_point<std::chrono::high_resolution_clock> processTime;
     Eigen::Isometry3d o_T_g;
@@ -268,8 +269,8 @@ void adjustComputeThreadPriority(std::thread& compute_thread, bool f=true) {
         cout << "new priority " << param.sched_priority << endl;
     }
     // Debug message for starting the compute thread with the new priority
-    std::cout << "Starting ModelPinocchio compute_thread with priority: "
-              << param.sched_priority << std::endl;
+    //std::cout << "Starting ModelPinocchio compute_thread with priority: "
+    //          << param.sched_priority << std::endl;
    
         // Set the new scheduling parameters for the compute thread
     errno = pthread_setschedparam(compute_thread.native_handle(), policy, &param);
@@ -314,8 +315,9 @@ public:
 	        Kp.diagonal() << 200, 200, 200, 200, 200, 200,200;
             Kd.diagonal() << 20, 20, 20, 20, 20, 20, 8;
             
-            //CONVEYOR_BELT_SPEED << -0.04633, 0.0, 0.0;
-            CONVEYOR_BELT_SPEED << -0.5, 0.0, 0.0;
+            //CONVEYOR_BELT_SPEED << -0.259, 0.0, 0.0; //high speed
+            //double MAX_CARTESIAN_VELOCITY = 0.7;
+	    CONVEYOR_BELT_SPEED << -0.5, 0.0, 0.0;
             OFFSET << 0.0, 0, 0.23;   
             GRASPING_TRANSFORMATION << 0, 1, 0,
                                       -1, 0, 0,
@@ -325,7 +327,7 @@ public:
             ALTERNATIVE_GRASPING_TRANSFORMATION = rotZPI.toRotationMatrix();
             if (graspObject_) GRASP_OFFSET << 0, 0, 0.1;
             else GRASP_OFFSET = OFFSET;
-            LIFT_HEIGHT = 0.4;
+            LIFT_HEIGHT = 0.5;
             DROP_OFF_POSITION << 0.55, -0.1, 0; 
             OBJECT_BOTTOM_TO_CENTRE = 0.075;
 	    STARTING_CONFIGURATION = Eigen::VectorXd(7);
@@ -402,7 +404,7 @@ public:
 
                 auto epoch_ms = std::chrono::duration_cast<std::chrono::milliseconds>(cameraData.processTime.time_since_epoch()).count();
 
-                log_measurements_ << get_unix_time_ms() + to_string(epoch_ms) + " ";
+                log_measurements_ << get_unix_time_ms() + to_string(epoch_ms) + " " + to_string(cameraData.tracking_time) + " " + to_string(cameraData.frameNumber) + " " ;
                 for (int i = 0; i < 4; ++ i) {
                     for (int j = 0; j < 4; ++j) {
                         log_measurements_  << cameraData.pose.matrix()(i, j) << " ";        
@@ -485,7 +487,9 @@ private:
     double OBJECT_BOTTOM_TO_CENTRE;
 
     double REGISTRATION_DURATION_ESTIMATE = 0.15;
-    double MAX_CARTESIAN_VELOCITY = 0.7;
+    double MAX_CARTESIAN_VELOCITY = 0.7; //high speed
+    //double MAX_CARTESIAN_VELOCITY = 0.40;    
+    
     int N = 20;
 
     int missingFrames;
@@ -797,6 +801,8 @@ private:
             auto startComp = chrono::high_resolution_clock::now();
             double intersectTime = feasibleMinTime(objectPose.translation(), CONVEYOR_BELT_SPEED, T_EE_0.topRightCorner<3,1>(), MAX_CARTESIAN_VELOCITY);
             if (intersectTime == -1) throw runtime_error("Failed to intersept the object");
+            cout << (objectPose.translation() + intersectTime * CONVEYOR_BELT_SPEED).transpose() << endl;
+            
             pair<vector<Eigen::VectorXd>, bool> result = generate_joint_waypoint(
                     N, 
                     intersectTime,
@@ -807,6 +813,7 @@ private:
                     GRASPING_TRANSFORMATION
                     );
             vector<Eigen::VectorXd>& jointWaypoints = result.first;
+            cout <<"fin pose " << jointWaypoints.back().transpose() << endl;
             if (result.second) GRASPING_TRANSFORMATION *= ALTERNATIVE_GRASPING_TRANSFORMATION; 
             auto endComp = chrono::high_resolution_clock::now();
             chrono::duration<double> computationTime = endComp - startComp;
@@ -944,7 +951,7 @@ private:
     thread workerThread_;
     void graspObject() {
         workerFinished.store(false, std::memory_order_release);
-        this->gripper_.grasp(0.005, 0.2, 7, 0.08, 0.08);
+        this->gripper_.grasp(0.005, 0.3, 7, 0.08, 0.08);
         workerFinished.store(true, std::memory_order_release);
     }
 
@@ -1009,7 +1016,7 @@ private:
         
         
         // Rate limiter
-        double MAX_RATE = 0.010; // 0.5 m / s
+        double MAX_RATE = 0.005; // 0.5 m / s
         Eigen::Vector3d desiredChange = estimatedObjectData.head(3) - visualServoingParams.filteredObjectPosition;
         Eigen::Vector3d saturedChange = desiredChange;
         saturedChange = saturedChange.cwiseMin(MAX_RATE);
@@ -1055,7 +1062,7 @@ private:
             visualServoingParams.offset += saturedOffsetChange; 
             
             if (visualServoingParams.subState == VisualServoingSubState::Approaching) {
-                if (graspObject_ && (visualServoingParams.filteredObjectPosition + GRASP_OFFSET - T_EE_0.topRightCorner<3, 1>()).norm() <= sqrt(3 * pow(0.010, 2)) ) {
+                if (graspObject_ && (visualServoingParams.filteredObjectPosition + GRASP_OFFSET - T_EE_0.topRightCorner<3, 1>()).norm() <= sqrt(3 * pow(0.010, 2)) ) { //high speed: 0.010
                     workerFinished.store(false, std::memory_order_release);
                     workerThread_ = thread(&StateController::graspObject, this);
                     adjustComputeThreadPriority(workerThread_);
@@ -1078,7 +1085,7 @@ private:
             
         }  
        
-        double predictionTimeDelta = 0.3;
+        double predictionTimeDelta = 0.3; //high speed 0.3
         if (visualServoingParams.newData) {
             visualServoingParams.newData = false;
             visualServoingParams.coeffs = vector<Eigen::VectorXd>(3);
@@ -1158,10 +1165,8 @@ private:
     array<double, 7> processLifting() { 
         Eigen::Matrix4d T_EE_0(Eigen::Matrix4d::Map(robot_state.O_T_EE.data()));
 
-        
-	//
-	//double MAX_CARTESIAN_DISPLACEMENT = 0.00007;
-    double MAX_CARTESIAN_DISPLACEMENT = 0.00035;
+	double MAX_CARTESIAN_DISPLACEMENT = 0.0003;
+        //double MAX_CARTESIAN_DISPLACEMENT = 0.00035; //high speed
     
 	Eigen::VectorXd tauCmd;
         switch (liftingParams.subState) {
@@ -1197,7 +1202,7 @@ private:
                     workerThread_.join();
                     Eigen::Vector3d desiredTransportPosition = DROP_OFF_POSITION;
                     desiredTransportPosition(2) = LIFT_HEIGHT;
-                    double transportExecutionTime = (T_EE_0.topRightCorner<3, 1>() - desiredTransportPosition).norm() / 0.4;
+                    double transportExecutionTime = (T_EE_0.topRightCorner<3, 1>() - desiredTransportPosition).norm() / 0.25; // high speed 0.4
                     double finalTime = time_stamp + transportExecutionTime; 
                     lock_guard<mutex> lock(workerMutex);
                     vector<Eigen::VectorXd> coeffs(7);
@@ -1235,7 +1240,7 @@ private:
                     liftingParams.subState = LiftingSubState::PlacementDown;
                     Eigen::Vector3d desiredTransportPosition = DROP_OFF_POSITION;
                     //Depends on object placement config // TODO implement that based on grasping orientation
-                    desiredTransportPosition(2) = OBJECT_BOTTOM_TO_CENTRE + liftingParams.actualGrasp.translation()(2);
+                    desiredTransportPosition(2) = LIFT_HEIGHT;// OBJECT_BOTTOM_TO_CENTRE + liftingParams.actualGrasp.translation()(2);
                     liftingParams.liftingGoalPose.translation() = desiredTransportPosition;
                     liftingParams.currentPose.linear() = T_EE_0.topLeftCorner<3, 3>();
                     liftingParams.currentPose.translation() = T_EE_0.topRightCorner<3, 1>();
@@ -1312,26 +1317,32 @@ void camera_data_receiver(zmq::context_t& ctx) {
         zmq::message_t msg_timestamp;
         zmq::message_t msg_ee_transform;
         zmq::message_t msg_iteration_idx;
+        zmq::message_t msg_tracking_time;
 
         vector<double> pose(6);
         vector<double> ee_pose(16);
         uint64_t timestamp_ns;
         int frameNumber;
 	    int iterationIdxServer;
-        try {
+        int trackingTime;
+	
+       try {
    
 		socket_in.recv(msg, zmq::recv_flags::none);
 		socket_in.recv(msg_frameNumber, zmq::recv_flags::dontwait);
 		socket_in.recv(msg_timestamp, zmq::recv_flags::dontwait);
 		socket_in.recv(msg_ee_transform, zmq::recv_flags::dontwait);
 		socket_in.recv(msg_iteration_idx, zmq::recv_flags::dontwait);
-	
+	    socket_in.recv(msg_tracking_time, zmq::recv_flags::dontwait);
+		
 		memcpy(pose.data(), msg.data(), 6 * sizeof(double));
 		memcpy(ee_pose.data(), msg_ee_transform.data(), 16 * sizeof(double));
 		memcpy(&frameNumber, msg_frameNumber.data(), sizeof(frameNumber));
 		memcpy(&iterationIdxServer, msg_iteration_idx.data(), sizeof(iterationIdxServer));
 		memcpy(&timestamp_ns, msg_timestamp.data(), sizeof(timestamp_ns));
-        } catch (const zmq::error_t& e) {
+        memcpy(&trackingTime, msg_tracking_time.data(), sizeof(int));
+
+	} catch (const zmq::error_t& e) {
             continue;
         }
 	
@@ -1377,7 +1388,8 @@ void camera_data_receiver(zmq::context_t& ctx) {
         Eigen::Isometry3d g_T_c =  g_T_cad * cad_T_cam_c * cam_c_T_c;
         Eigen::Isometry3d o_T_g(o_T_g_matrix);
         std::lock_guard<std::mutex> lock(cameraDataMutex);
-        cameraData = { true, g_T_c * camera_T_tag, false, true, false, frameNumber, start, o_T_g };
+        
+        cameraData = { true, g_T_c * camera_T_tag, false, true, false, trackingTime, frameNumber, start, o_T_g };
  
     }
 }
@@ -1426,6 +1438,9 @@ int main(int argc, char ** argv) {
     zmq::socket_t socket_control;
 
     socket = zmq::socket_t(ctx, zmq::socket_type::push);
+    int max_backlog = 8;
+    socket.setsockopt(ZMQ_SNDHWM, &max_backlog, sizeof(max_backlog));
+
     socket.connect("tcp://" + BASE_IP + ":5555");
     socket_control = zmq::socket_t(ctx, zmq::socket_type::req);
     socket_control.connect("tcp://" + BASE_IP + ":5553");
@@ -1456,7 +1471,7 @@ int main(int argc, char ** argv) {
     } else {
         gripper.move(0.08, 0.15);
     }
-  
+    cout << "robot is set up" << endl; 
     //Camera set up
     rs2::pipeline pipe;
     rs2::config cfg;
@@ -1530,17 +1545,31 @@ int main(int argc, char ** argv) {
             zmq::message_t msg_ee_pose(sizeof(double) * flattenedData.size());
             memcpy(msg_ee_pose.data(), flattenedData.data(), flattenedData.size() * sizeof(double));
 
-            socket.send(msg_color, zmq::send_flags::sndmore);
-            socket.send(msg_depth, zmq::send_flags::sndmore);
-            socket.send(msgFrameNumber, zmq::send_flags::sndmore);
-            socket.send(msg_timestamp, zmq::send_flags::sndmore);
-            socket.send(msg_ee_pose, zmq::send_flags::sndmore);
-            socket.send(msgIterationIdx, zmq::send_flags::none);
+            auto now_zmq_start = chrono::high_resolution_clock::now();
+            std::optional<long int> res;// | zmq::send_flags::dontwait
+            res = socket.send(msg_color, zmq::send_flags::sndmore);
+            if(res.value()==-1 && errno == EAGAIN)std::cout << "hwm hit" << std::endl;
+            res = socket.send(msg_depth, zmq::send_flags::sndmore);
+            if(res.value()==-1 && errno == EAGAIN)std::cout << "hwm hit" << std::endl;
+            res = socket.send(msgFrameNumber, zmq::send_flags::sndmore);
+            if(res.value()==-1 && errno == EAGAIN)std::cout << "hwm hit" << std::endl;
+            res = socket.send(msg_timestamp, zmq::send_flags::sndmore);
+            if(res.value()==-1 && errno == EAGAIN)std::cout << "hwm hit" << std::endl;
+            res = socket.send(msg_ee_pose, zmq::send_flags::sndmore);
+            if(res.value()==-1 && errno == EAGAIN)std::cout << "hwm hit" << std::endl;
+            res = socket.send(msgIterationIdx, zmq::send_flags::none);
+            if(res.value()==-1 && errno == EAGAIN)std::cout << "hwm hit" << std::endl;
+            auto delta_zmq = chrono::duration_cast<chrono::nanoseconds>(chrono::high_resolution_clock::now() - now_zmq_start).count();
+            auto delta_zmq_ns = static_cast<uint64_t>(delta_zmq);
+            if(delta_zmq_ns > 100000) {
+                std::cout << "delta_zmq_ns: " << delta_zmq_ns << std::endl;
+            }
             
             frameNumberG ++;
     };
    
     rs2::pipeline_profile profile = pipe.start(cfg, realsense_callback);
+    cout << "camera is set up" << endl;
     auto intrinsics = pipe.get_active_profile().get_stream(rs2_stream::RS2_STREAM_COLOR).as<rs2::video_stream_profile>().get_intrinsics();
     auto depth_sensor = profile.get_device().first<rs2::depth_sensor>();
     depth_sensor.set_option(RS2_OPTION_DEPTH_UNITS, 0.001f);
