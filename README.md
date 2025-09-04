@@ -77,7 +77,7 @@ Follow NVIDIA’s guide to set up **FoundationPose**. Once installed:
 1. Place `pose_estimator_server.py` into the **root folder** of the FoundationPose repository.  
 2. Start the server:
    ```bash
-   python pose_estimator_server.py
+   FIVEG_ENABLED=false python pose_estimator_server.py --debug 0
 
 ### 2. Running the Robot Controlle
 1. Update IP Addresses:
@@ -87,6 +87,8 @@ Follow NVIDIA’s guide to set up **FoundationPose**. Once installed:
    mkdir build && cd build
    cmake ..
    make
-3. Run the controller, specifying the robot's hostname
+3. Run the controller, specifying the robot's hostname(exp_hash, exp_num, exp_dir are just for logging purposes)
    ```bash
-   ./state_controller <robot_host>
+   mode=5G exp_hash="#1" exp_num=0 exp_dir="default" ./state_controller franka2 true
+
+   
