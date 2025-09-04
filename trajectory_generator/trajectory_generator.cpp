@@ -133,26 +133,50 @@ std::pair<SX,SX> forward_kinematics(const SX &q)
     return std::make_pair(pos, R);
 }
 
-std::vector<Eigen::VectorXd> generate_joint_waypoint(
+double computeScore(Eigen::VectorXd q, int ndof, std::vector<double>& upperJointsLimits, std::vector<double>& lowerJointsLimits) {
+    double margin = 10000000;
+    for (int i = 0; i < ndof; i ++) {
+        margin = std::min(margin, std::min(q(i) - lowerJointsLimits[i], upperJointsLimits[i] - q(i)) / (upperJointsLimits[i] - lowerJointsLimits[i]));
+    }
+    std::cout << "Score: " << margin << std::endl;
+    return margin;
+}
+
+std::pair<std::vector<Eigen::VectorXd>, bool> generate_joint_waypoint(
         int N,
         double total_time,
         Eigen::Isometry3d obj_init_pose,
         Eigen::Vector3d obj_vel,
         Eigen::VectorXd robot_joint_config,
-        Eigen::Vector3d offset,
-        Eigen::Matrix3d graspingTransformation
+        //new feat ?
+        double offset,
+        Eigen::Matrix3d graspingTransformation,
+        Eigen::Isometry3d& finalPose
         )
 { 
-    // -------------------------------------------------------------------------
+    Eigen::AngleAxisd rotZPI(M_PI, Eigen::Vector3d::UnitZ());
+    Eigen::Matrix3d matirxRotZPI = rotZPI.toRotationMatrix();
+    std::vector<Eigen::Matrix3d> symmetricGripperTransform = { Eigen::Matrix3d::Identity(), matirxRotZPI };
+    std::vector<std::vector<Eigen::VectorXd>> result(2, std::vector<Eigen::VectorXd>(N));
     int ndof = 7;
-    Eigen::Vector3d obj_init_pos = obj_init_pose.translation();
+    std::vector<double> upperJointsLimits = {2.8973,  1.7628,  2.8973, -0.0698, 2.8973, 3.7525, 2.8973};
+    std::vector<double> lowerJointsLimits = {-2.8973, -1.7628, -2.8973, -3.0718, -2.8973, -0.0175, -2.8973};
+    std::vector<double> upperVelocityLimits = {2, 2, 2, 2, 2, 2, 2};
+    std::vector<double> lowerVelocityLimits = {-2, -2, -2, -2, -2, -2, -2};
+    
+        Eigen::Vector3d obj_init_pos = obj_init_pose.translation();
+
+    for (int ind = 0; ind < 2; ind ++) {  
+    // -------------------------------------------------------------------------
     SX robotJointPositionSX = SX::zeros(7);
     for (int i = 0; i < ndof; i ++) robotJointPositionSX(i) = robot_joint_config(i);
 
     // -------------------------------------------------------------------------
-    Eigen::Vector3d robot_pos_fin = obj_init_pos + obj_vel * total_time + offset;
- 
-    Eigen::Matrix3d orientationFinalEigen = obj_init_pose.linear() * graspingTransformation;
+    Eigen::Matrix3d orientationFinalEigen = obj_init_pose.linear() * graspingTransformation * symmetricGripperTransform[ind];
+    //new feat ?
+    Eigen::Vector3d robot_pos_fin = obj_init_pos + obj_vel * total_time - offset*orientationFinalEigen.topRightCorner<3, 1>();
+    std::cout << "no offset " << (obj_init_pos + obj_vel * total_time).transpose() << std::endl;
+    std::cout << "offset " << robot_pos_fin.transpose() << std::endl; 
     DM orient_fin = DM::zeros(3 ,3);
     for (int i = 0; i < 3; i ++) {
         for (int j = 0; j < 3; j ++) {
@@ -191,13 +215,7 @@ std::vector<Eigen::VectorXd> generate_joint_waypoint(
  
     std::vector<SX> g_list;
     std::vector<double> lbg_list, ubg_list;
- 
- 
-    std::vector<double> upperJointsLimits = {2.8973,  1.7628,  2.8973, -0.0698, 2.8973, 3.7525, 2.8973};
-    std::vector<double> lowerJointsLimits = {-2.8973, -1.7628, -2.8973, -3.0718, -2.8973, -0.0175, -2.8973};
-    std::vector<double> upperVelocityLimits = {2, 2, 2, 2, 2, 2, 2};
-    std::vector<double> lowerVelocityLimits = {-2, -2, -2, -2, -2, -2, -2};
-   
+    
     for (int i=0; i<N; i++)
     {
         SX q_i = get_q(i);
@@ -209,16 +227,25 @@ std::vector<Eigen::VectorXd> generate_joint_waypoint(
         if (i == 0)
         {
             SX err = q_i - robotJointPositionSX;
-            obj += 10 * dot(err, err);
+            //iobj += 10 * dot(err, err);
             obj += 1.5 * dot(dq_i, dq_i);
         }
         else if (i == N-1)
         {
             SX pos_err = pos_ee - vertcat(SX(robot_pos_fin(0)), SX(robot_pos_fin(1)), SX(robot_pos_fin(2)));
-            obj += 50* dot(pos_err, pos_err);
+            obj += 70* dot(pos_err, pos_err);
             SX err = orientationErrorAngleAxis(R_ee, orient_fin);   
             obj += 50 * dot(err, err);
             obj += 1.5 * dot(dq_i, dq_i);
+            /*
+            double margin = 0.1;  // Start penalizing within 0.1 rad of the joint limits
+
+            for (int i = 0; i < ndof; ++i) {
+                SX lower_margin = fmax(0.0, margin - (q_i(i) - lowerJointsLimits[i]));
+                SX upper_margin = fmax(0.0, margin - (upperJointsLimits[i] - q_i(i)));
+                obj += pow(lower_margin, 2) + pow(upper_margin, 2);
+            }
+            */
         }
         else
         {
@@ -227,7 +254,7 @@ std::vector<Eigen::VectorXd> generate_joint_waypoint(
             SX z_unit = z_vec / z_norm_ee;
  
             SX err = 1 - dot(R_ee(Slice(),2), z_unit);
-            obj += 0.5 * dot(err, err);
+            if (i > 9 ) obj += 0.5 * dot(err, err);
             obj += 0.2 * dot(dq_i, dq_i);
 
         }
@@ -245,6 +272,39 @@ std::vector<Eigen::VectorXd> generate_joint_waypoint(
     }
  
     // -------------------------------------------------------------------------
+    SX q_init_c = get_q(0);
+   
+    for (int i = 0; i < ndof; ++ i) {
+        g_list.push_back(q_init_c(i) - robot_joint_config(i));
+        lbg_list.push_back(0.0);
+        ubg_list.push_back(0.0);
+    }
+    /*
+    SX endEffectorOrientation = endEffectorPose.second;
+    SX orientationDesiredCA = SX::zeros(3,3);
+    std::cout <<"orien " << ind << std::endl;
+    for (int i = 0; i < 3; i ++) {
+        for (int j = 0; j < 3; j ++) {
+            orientationDesiredCA(i, j) = orient_fin(i, j);
+            std::cout << orient_fin(i, j) <<  " ";
+        }   
+        std::cout << std::endl; 
+    }
+    std::cout << std::endl;
+    SX angleAxisErr = orientationErrorAngleAxis(endEffectorOrientation, orientationDesiredCA);
+    
+    for (int i = 0; i < 3; i ++) {
+        g_list.push_back(angleAxisErr(i));
+        lbg_list.push_back(0.0);
+        ubg_list.push_back(0.0);
+    }
+    
+    for (int i = 0; i < 3; i ++) {
+        g_list.push_back(endEffectorPosition(i) - robot_pos_fin(i));
+        lbg_list.push_back(0.0);
+        ubg_list.push_back(0.0);
+    }*/
+
     SX g;
     if (!g_list.empty())
     {
@@ -300,13 +360,30 @@ std::vector<Eigen::VectorXd> generate_joint_waypoint(
     res = solver(arg);
 
     std::vector<double> q_opt = std::vector<double>(res["x"]);
-    std::vector<Eigen::VectorXd> result(N);
     for (int i = 0; i < N; i ++){
         Eigen::Map<Eigen::VectorXd> vec(&q_opt[i * ndof], ndof);
-        result[i] = vec;
+        result[ind][i] = vec;
     }
-    return result;
-}
+    }
+    
+    if (computeScore(result[0].back(), ndof, upperJointsLimits, lowerJointsLimits) > computeScore(result[1].back(), ndof, upperJointsLimits, lowerJointsLimits)) {
+        Eigen::Matrix3d orientationFinalEigen = obj_init_pose.linear();
+        Eigen::Vector3d robot_pos_fin = obj_init_pos + obj_vel * total_time;
+
+        finalPose.translation() = robot_pos_fin;
+        finalPose.linear() = orientationFinalEigen;
+        return std::make_pair(result[0], false);
+    } else {
+        Eigen::Matrix3d orientationFinalEigen = obj_init_pose.linear();
+        Eigen::Vector3d robot_pos_fin = obj_init_pos + obj_vel * total_time;
+
+        finalPose.translation() = robot_pos_fin;
+        finalPose.linear() = orientationFinalEigen;
+
+        return std::make_pair(result[1], true);
+    }
+ }
+
 
 Eigen::VectorXd solveInverseKinematics(
         Eigen::Matrix<double, 7, 1> initialJointConfiguration,
@@ -314,6 +391,9 @@ Eigen::VectorXd solveInverseKinematics(
         )
 { 
     int ndof = 7;
+    std::vector<double> upperJointsLimits = {2.8973,  1.7628,  2.8973, -0.0698, 2.8973, 3.7525, 2.8973};
+    std::vector<double> lowerJointsLimits = {-2.8973, -1.7628, -2.8973, -3.0718, -2.8973, -0.0175, -2.8973};
+
     SX q_sym = SX::sym("q", ndof * 2);
     auto get_q = [&](int i)
     {
@@ -330,6 +410,11 @@ Eigen::VectorXd solveInverseKinematics(
     SX obj = SX::zeros(1);
     SX difference = qInitial - qFinal;
     obj = dot(difference, difference); 
+    
+    for (int i = 0; i < ndof; i ++) {
+        double range = upperJointsLimits[i] - lowerJointsLimits[i];
+        obj += 30 * pow((qFinal(i) - lowerJointsLimits[i] - range / 2) / range, 2); 
+    }
 
     std::vector<SX> g_list;
     std::vector<double> lbg_list, ubg_list;
@@ -361,10 +446,7 @@ Eigen::VectorXd solveInverseKinematics(
         lbg_list.push_back(0.0);
         ubg_list.push_back(0.0);
    }
-
-   std::vector<double> upperJointsLimits = {2.8973,  1.7628,  2.8973, -0.0698, 2.8973, 3.7525, 2.8973};
-   std::vector<double> lowerJointsLimits = {-2.8973, -1.7628, -2.8973, -3.0718, -2.8973, -0.0175, -2.8973};
-   
+  
    SX g;
    if (!g_list.empty())
    {
